@@ -36,4 +36,5 @@
 [dir="ltr"] .topbar,[dir="ltr"] .section-heading,[dir="ltr"] .product-bottom{direction:ltr}
 [dir="ltr"] .admin-content,[dir="ltr"] .content{direction:ltr}
 @media(max-width:620px){.lang-toggle{font-size:12px;padding:8px}.review-dialog{padding:18px}}
-\n.brand-mark img{width:100%;height:100%;object-fit:cover;border-radius:inherit}\n
+
+.brand-mark img{width:100%;height:100%;object-fit:cover;border-radius:inherit}
