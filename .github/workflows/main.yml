@@ -40,6 +40,7 @@ jobs:
         env:
           VITE_SUPABASE_URL: ${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
           VITE_SUPABASE_ANON_KEY: ${{ secrets.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY }}
+          VITE_OWNER_EMAIL: afryst61@gmail.com
 
       - name: Upload build files
         uses: actions/upload-pages-artifact@v3
@@ -58,3 +59,4 @@ jobs:
       - name: Deploy to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v4
+        
