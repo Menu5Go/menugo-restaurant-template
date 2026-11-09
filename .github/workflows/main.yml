@@ -1,3 +1,4 @@
+
 name: Deploy MenuGo to GitHub Pages
 
 on:
@@ -36,6 +37,9 @@ jobs:
 
       - name: Build MenuGo
         run: npm run build -- --base=/menugo-restaurant-template/
+        env:
+          VITE_SUPABASE_URL: ${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
+          VITE_SUPABASE_ANON_KEY: ${{ secrets.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY }}
 
       - name: Upload build files
         uses: actions/upload-pages-artifact@v3
@@ -54,4 +58,3 @@ jobs:
       - name: Deploy to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v4
-        
