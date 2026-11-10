@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useState } from 'react'
 import { supabase, isSupabaseConfigured, ownerEmail } from './supabase.js'
 import { money, whatsappUrl } from './format.js'
-import { Menu, ShoppingBag, Search, Plus, Minus, Trash2, Settings, LogIn, LogOut, Package, QrCode, ExternalLink, Eye, EyeOff, Save, X, Instagram, Facebook, Coffee, Utensils, ChevronDown } from 'lucide-react'
+import { Menu, ShoppingBag, Search, Plus, Minus, Trash2, Settings, LogIn, LogOut, Package, QrCode, ExternalLink, Eye, EyeOff, Save, X, Instagram, Facebook, MapPin, Coffee, Utensils, ChevronDown, CheckCircle2, AlertCircle, ShieldAlert } from 'lucide-react'
 
 const demoCategories = [
   { id: 'hot', name: 'مشروبات ساخنة', sort_order: 1, is_visible: true },
@@ -19,6 +19,7 @@ const initialSettings = {
   restaurant_name: 'مطعم MenuGo', tagline: 'أهلاً وسهلاً بكم', currency: 'EUR',
   whatsapp_enabled: false, whatsapp_number: '', internal_orders_enabled: false,
   facebook_enabled: false, facebook_url: '', instagram_enabled: false, instagram_url: '',
+  restaurant_address: '', restaurant_location_url: '',
   primary_color: '#1d4738', logo_url: '', cover_url: ''
 }
 const emptyProduct = { name: '', name_ar: '', name_en: '', description: '', description_ar: '', description_en: '', price: '', category_id: '', image_url: '', is_available: true, is_featured: false }
@@ -43,6 +44,8 @@ export default function App() {
   const [authReady, setAuthReady] = useState(false)
   const [loading, setLoading] = useState(false)
   const [notice, setNotice] = useState('')
+  const [noticeKind, setNoticeKind] = useState('success')
+  const [confirmDialog, setConfirmDialog] = useState(null)
   const [productDraft, setProductDraft] = useState(emptyProduct)
   const [categoryDraft, setCategoryDraft] = useState('')
   const [editingProduct, setEditingProduct] = useState(null)
@@ -195,6 +198,19 @@ export default function App() {
   const isGoogleUser = session?.user?.app_metadata?.provider === 'google' || userProviders.includes('google')
   const allowedOwner = Boolean(session?.user?.email && session.user.email.toLowerCase() === ownerEmail && session.user.email_confirmed_at && isGoogleUser)
   const isAdminEntry = new URLSearchParams(window.location.search).get('admin') === '1'
+
+  // Keep an authenticated owner in the private admin area across navigation and reloads.
+  // Supabase persists the actual auth session; the URL flag only restores the admin route.
+  useEffect(() => {
+    if (!authReady || !allowedOwner) return
+    if (page !== 'admin') setPage('admin')
+    const currentUrl = new URL(window.location.href)
+    if (currentUrl.searchParams.get('admin') !== '1') {
+      currentUrl.searchParams.set('admin', '1')
+      window.history.replaceState({}, '', `${currentUrl.pathname}${currentUrl.search}${currentUrl.hash}`)
+    }
+  }, [authReady, allowedOwner, page])
+
   const visibleCategories = categories.filter(c => c.is_visible !== false && c.is_published !== false).sort((a,b) => a.sort_order-b.sort_order)
   const shownProducts = useMemo(() => products.filter(p =>
     p.is_available !== false && p.is_published !== false &&
@@ -204,7 +220,20 @@ export default function App() {
   const total = cart.reduce((sum, item) => sum + Number(item.price) * item.quantity, 0)
   const count = cart.reduce((sum, item) => sum + item.quantity, 0)
 
-  const notify = (msg) => { setNotice(msg); window.setTimeout(() => setNotice(''), 3200) }
+  const notify = (msg, kind) => {
+    const rawMessage = String(msg ?? '')
+    const friendlyMessage = /[a-z]{3,}|\b(PGRST|SQLSTATE|JWT|HTTP)\b/i.test(rawMessage)
+      ? 'تعذر إتمام العملية حالياً. تحقق من الاتصال وحاول مرة أخرى.'
+      : rawMessage
+    const inferredKind = kind || (/تعذر|فشل|خطأ|يلزم|غير متاح|فارغة|أدخل|اختر|الحد الأقصى/i.test(friendlyMessage) ? 'error' : 'success')
+    setNoticeKind(inferredKind)
+    setNotice(friendlyMessage)
+  }
+  useEffect(() => {
+    if (!notice) return
+    const timer = window.setTimeout(() => setNotice(''), 3600)
+    return () => window.clearTimeout(timer)
+  }, [notice])
   const updateSetting = (key, value) => setSettings(prev => ({ ...prev, [key]: value }))
   const addToCart = (product) => setCart(prev => {
     const found = prev.find(x => x.id === product.id)
@@ -250,13 +279,19 @@ export default function App() {
     setCategoryDraft(''); setCategoryDraftAr(''); setCategoryDraftEn(''); setEditingCategory(null); notify('تم حفظ القسم')
   }
   const deleteCategory = async (id) => {
-    if (!window.confirm('هل تريد حذف هذا القسم؟')) return
+    setConfirmDialog({
+      title: 'حذف القسم',
+      message: 'هل أنت متأكد من حذف هذا القسم؟ سيتم أيضاً إزالة المنتجات المرتبطة به من القائمة.',
+      confirmLabel: 'نعم، احذف القسم',
+      onConfirm: async () => {
     if (supabase) {
       const { error } = await supabase.from('categories').delete().eq('id', id)
       if (error) return notify(error.message)
     }
     setCategories(prev => prev.filter(c => c.id !== id)); setProducts(prev => prev.filter(p => p.category_id !== id))
     notify('تم حذف القسم')
+      }
+    })
   }
   const saveProduct = async () => {
     if (!(productDraft.name_ar.trim() || productDraft.name_en.trim()) || !productDraft.category_id || productDraft.price === '') return notify('أكمل اسم المنتج والقسم والسعر')
@@ -274,12 +309,18 @@ export default function App() {
     setProductDraft(emptyProduct); setEditingProduct(null); notify('تم حفظ المنتج')
   }
   const deleteProduct = async (id) => {
-    if (!window.confirm('هل تريد حذف المنتج؟')) return
+    setConfirmDialog({
+      title: 'حذف المنتج',
+      message: 'هل تريد حذف هذا المنتج نهائياً من قائمة المطعم؟',
+      confirmLabel: 'نعم، احذف المنتج',
+      onConfirm: async () => {
     if (supabase) {
       const { error } = await supabase.from('products').delete().eq('id', id)
       if (error) return notify(error.message)
     }
     setProducts(prev => prev.filter(p => p.id !== id)); notify('تم حذف المنتج')
+      }
+    })
   }
   const sendWhatsApp = () => {
     if (!settings.whatsapp_enabled) return notify('الطلب عبر واتساب غير متاح حالياً')
@@ -327,14 +368,19 @@ export default function App() {
 
   return <div className="app-shell" style={{'--brand': settings.primary_color || '#1d4738'}}>
     <header className="topbar">
-      <button className="icon-btn mobile-menu" onClick={() => setPage('menu')} aria-label="القائمة"><Menu/></button>
+      <button className="icon-btn mobile-menu" onClick={() => allowedOwner ? window.scrollTo({top: 0, behavior: 'smooth'}) : setPage('menu')} aria-label={allowedOwner ? 'لوحة الإدارة' : 'القائمة'}><Menu/></button>
       <div className="brand"><div className="brand-mark">{settings.logo_url?<img src={settings.logo_url} alt="logo"/>:<Utensils size={20}/>}</div><div><strong>{lang === 'ar' ? settings.restaurant_name : (settings.restaurant_name_en || settings.restaurant_name)}</strong><small>{text('القائمة الإلكترونية','Digital menu')}</small></div></div>
       <button className="outline-btn lang-toggle" onClick={() => setLang(lang === 'ar' ? 'en' : 'ar')}>{lang === 'ar' ? 'English' : 'العربية'}</button><nav className="top-nav">
-        <button className={page==='menu'?'active':''} onClick={()=>setPage('menu')}>المينيو</button>
-        <button className={page==='cart'?'active':''} onClick={()=>setPage('cart')}>السلة <span className="count">{count}</span></button>
-
+        {allowedOwner ? <>
+          <button className="active" onClick={() => document.getElementById('settings-panel')?.scrollIntoView({behavior:'smooth'})}>لوحة الإدارة</button>
+          <button onClick={() => document.getElementById('products-panel')?.scrollIntoView({behavior:'smooth'})}>المنتجات</button>
+          <button onClick={() => document.getElementById('orders-panel')?.scrollIntoView({behavior:'smooth'})}>الطلبات</button>
+        </> : <>
+          <button className={page==='menu'?'active':''} onClick={()=>setPage('menu')}>المينيو</button>
+          <button className={page==='cart'?'active':''} onClick={()=>setPage('cart')}>السلة <span className="count">{count}</span></button>
+        </>}
       </nav>
-      <button className="cart-top" onClick={()=>setPage('cart')}><ShoppingBag size={18}/><span>{count}</span></button>
+      {!allowedOwner && <button className="cart-top" onClick={()=>setPage('cart')}><ShoppingBag size={18}/><span>{count}</span></button>}
     </header>
 
     {page==='menu' && <>
@@ -351,11 +397,12 @@ export default function App() {
       <footer className="footer"><div><strong>{settings.restaurant_name}</strong><p>نسعد بخدمتكم دائماً</p></div><div className="socials">
         {settings.facebook_enabled&&settings.facebook_url&&<a href={settings.facebook_url} target="_blank" rel="noreferrer" aria-label="Facebook"><Facebook/></a>}
         {settings.instagram_enabled&&settings.instagram_url&&<a href={settings.instagram_url} target="_blank" rel="noreferrer" aria-label="Instagram"><Instagram/></a>}
-      </div><small>Powered by MenuGo</small></footer>
+        {settings.restaurant_location_url&&<a href={settings.restaurant_location_url} target="_blank" rel="noreferrer" aria-label="موقع المطعم" title="موقع المطعم"><MapPin/></a>}
+      </div><div className="footer-location">{settings.restaurant_address&&<small>{settings.restaurant_address}</small>}{settings.restaurant_location_url&&<a className="footer-map-link" href={settings.restaurant_location_url} target="_blank" rel="noreferrer"><MapPin size={16}/> موقع المطعم</a>}</div><small>Powered by MenuGo</small></footer>
     </>}
 
     {page==='cart'&&<main className="content narrow"><div className="section-heading"><div><span className="eyebrow">YOUR ORDER</span><h2>سلة الطلبات</h2><p>راجع طلبك قبل الإرسال</p></div><button className="outline-btn" onClick={()=>setPage('menu')}>العودة للقائمة</button></div>
-      {!cart.length?<div className="empty-state"><ShoppingBag size={38}/><h3>سلتك فارغة</h3><p>أضف بعض الأصناف اللذيذة من القائمة.</p><button className="primary-btn" onClick={()=>setPage('menu')}>تصفح المينيو</button></div>:<div className="cart-layout"><section className="cart-items">{cart.map(item=><div className="cart-row" key={item.id}><div className="cart-thumb"><Utensils/></div><div className="cart-desc"><strong>{item.name}</strong><small>{money(item.price,settings.currency)} للقطعة</small></div><div className="qty"><button onClick={()=>changeQty(item.id,-1)}><Minus size={14}/></button><b>{item.quantity}</b><button onClick={()=>changeQty(item.id,1)}><Plus size={14}/></button></div><strong>{money(item.price*item.quantity,settings.currency)}</strong><button className="remove-btn" onClick={()=>changeQty(item.id,-item.quantity)}><Trash2 size={17}/></button></div>)}
+      {!cart.length?<div className="empty-state"><ShoppingBag size={38}/><h3>سلتك فارغة</h3><p>أضف بعض الأصناف اللذيذة من القائمة.</p><button className="primary-btn" onClick={()=>setPage('menu')}>تصفح المينيو</button></div>:<div className="cart-layout"><section className="cart-items">{cart.map(item=><div className="cart-row" key={item.id}><div className="cart-thumb">{item.image_url?<img src={item.image_url} alt={item.name}/>:<Utensils size={22}/>}</div><div className="cart-desc"><strong>{item.name}</strong><small>{money(item.price,settings.currency)} للقطعة</small></div><div className="qty"><button onClick={()=>changeQty(item.id,-1)}><Minus size={14}/></button><b>{item.quantity}</b><button onClick={()=>changeQty(item.id,1)}><Plus size={14}/></button></div><strong>{money(item.price*item.quantity,settings.currency)}</strong><button className="remove-btn" onClick={()=>changeQty(item.id,-item.quantity)}><Trash2 size={17}/></button></div>)}
       <label className="field-label">ملاحظات على الطلب<textarea value={orderNote} onChange={e=>setOrderNote(e.target.value)} placeholder="مثلاً: بدون بصل، أو صوص إضافي..."/></label></section><aside className="summary"><h3>ملخص الطلب</h3><div><span>عدد الأصناف</span><b>{count}</b></div><div className="grand-total"><span>الإجمالي</span><strong>{money(total,settings.currency)}</strong></div>
       {settings.whatsapp_enabled&&<button className="whatsapp-btn" onClick={sendWhatsApp}>إرسال الطلب عبر واتساب</button>}
       {settings.internal_orders_enabled&&<button className="primary-btn full" onClick={submitInternalOrder}>تأكيد الطلب</button>}
@@ -388,6 +435,7 @@ export default function App() {
         <div className="setting-row"><div><b>استقبال الطلبات داخل النظام</b><small>حفظ الطلبات في قاعدة البيانات لمتابعة حالتها</small></div><input type="checkbox" checked={!!settings.internal_orders_enabled} onChange={e=>updateSetting('internal_orders_enabled',e.target.checked)}/></div>
         <div className="social-setting"><div className="social-heading"><Facebook/><b>فيسبوك</b><input type="checkbox" checked={!!settings.facebook_enabled} onChange={e=>updateSetting('facebook_enabled',e.target.checked)}/></div>{settings.facebook_enabled&&<input value={settings.facebook_url||''} onChange={e=>updateSetting('facebook_url',e.target.value)} placeholder="رابط صفحة فيسبوك"/>}</div>
         <div className="social-setting"><div className="social-heading"><Instagram/><b>إنستغرام</b><input type="checkbox" checked={!!settings.instagram_enabled} onChange={e=>updateSetting('instagram_enabled',e.target.checked)}/></div>{settings.instagram_enabled&&<input value={settings.instagram_url||''} onChange={e=>updateSetting('instagram_url',e.target.value)} placeholder="رابط حساب إنستغرام"/>}</div>
+        <div className="social-setting location-setting"><div className="social-heading"><MapPin/><b>موقع المطعم على الخريطة</b></div><label className="single-field">عنوان المطعم<input value={settings.restaurant_address||''} onChange={e=>updateSetting('restaurant_address',e.target.value)} placeholder="المدينة، الشارع، رقم المبنى"/></label><label className="single-field">رابط Google Maps<input type="url" value={settings.restaurant_location_url||''} onChange={e=>updateSetting('restaurant_location_url',e.target.value)} placeholder="https://maps.google.com/..."/></label><small className="muted">انسخ رابط المشاركة من خرائط Google والصقه هنا. سيظهر زر الموقع للزوار عند إدخال الرابط.</small></div>
         <button className="primary-btn" onClick={saveSettings}><Save size={17}/> حفظ الإعدادات</button>
       </section>
       <section id="categories-panel" className="admin-panel"><div className="panel-title"><Package/><div><h3>إدارة الأقسام</h3><p>أضف أقساماً غير محددة العدد ورتبها حسب قائمتك.</p></div></div><div className="inline-form"><input value={categoryDraftAr} onChange={e=>setCategoryDraftAr(e.target.value)} placeholder="اسم القسم بالعربية"/><input value={categoryDraftEn} onChange={e=>setCategoryDraftEn(e.target.value)} placeholder="Category name in English"/><button className="primary-btn" onClick={saveCategory}>{editingCategory?'تحديث القسم':'إضافة قسم'}</button>{editingCategory&&<button className="outline-btn" onClick={()=>{setEditingCategory(null);setCategoryDraft('');setCategoryDraftAr('');setCategoryDraftEn('')}}>إلغاء</button>}</div>
@@ -411,7 +459,22 @@ export default function App() {
     </>}</main>}
 
     {reviewDraft.product&&<div className="review-backdrop"><section className="review-dialog"><button className="remove-btn" onClick={()=>setReviewDraft({product:null,rating:5,comment:''})}><X/></button><h3>{text('تقييم المنتج','Rate product')}: {localized(reviewDraft.product,'name')}</h3><label>{text('التقييم بالنجوم','Star rating')}<select value={reviewDraft.rating} onChange={e=>setReviewDraft({...reviewDraft,rating:e.target.value})}>{[5,4,3,2,1].map(n=><option key={n} value={n}>{'★'.repeat(n)} ({n})</option>)}</select></label><label>{text('تعليق اختياري','Optional comment')}<textarea maxLength={1000} value={reviewDraft.comment} onChange={e=>setReviewDraft({...reviewDraft,comment:e.target.value})}/></label><button className="primary-btn" onClick={submitReview}>{text('إرسال التقييم','Submit review')}</button></section></div>}
-    {notice&&<div className="toast">{notice}</div>}
+    {notice&&<div className={`toast toast-${noticeKind}`} role="status" aria-live="polite">
+      {noticeKind === 'error' ? <AlertCircle size={19}/> : <CheckCircle2 size={19}/>}
+      <span>{notice}</span>
+      <button className="toast-close" onClick={()=>setNotice('')} aria-label="إغلاق الإشعار"><X size={16}/></button>
+    </div>}
+    {confirmDialog&&<div className="confirm-backdrop" role="presentation" onMouseDown={e=>{if(e.target===e.currentTarget)setConfirmDialog(null)}}>
+      <section className="confirm-dialog" role="alertdialog" aria-modal="true" aria-labelledby="confirm-title" aria-describedby="confirm-message">
+        <div className="confirm-icon"><ShieldAlert size={25}/></div>
+        <h3 id="confirm-title">{confirmDialog.title}</h3>
+        <p id="confirm-message">{confirmDialog.message}</p>
+        <div className="confirm-actions">
+          <button className="outline-btn" onClick={()=>setConfirmDialog(null)}>إلغاء</button>
+          <button className="confirm-danger" onClick={async()=>{const action=confirmDialog.onConfirm;setConfirmDialog(null);await action()}}>{confirmDialog.confirmLabel || 'تأكيد الحذف'}</button>
+        </div>
+      </section>
+    </div>}
     {page==='menu'&&cart.length>0&&<button className="floating-cart" onClick={()=>setPage('cart')}><ShoppingBag/> عرض السلة <b>{count}</b><strong>{money(total,settings.currency)}</strong></button>}
   </div>
 }
