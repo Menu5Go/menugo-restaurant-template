@@ -23,6 +23,25 @@ const initialSettings = {
   primary_color: '#1d4738', logo_url: '', cover_url: ''
 }
 const emptyProduct = { name: '', name_ar: '', name_en: '', description: '', description_ar: '', description_en: '', price: '', category_id: '', image_url: '', is_available: true, is_featured: false }
+
+const categoryLabel = (category) => {
+  const ar = String(category?.name_ar || category?.name || '').trim()
+  const en = String(category?.name_en || '').trim()
+  return en && en !== ar ? `${ar} / ${en}` : (ar || en)
+}
+
+const restaurantMapUrl = (settings) => {
+  const raw = String(settings?.restaurant_location_url || '').trim()
+  if (raw) {
+    try {
+      const candidate = /^https?:\/\//i.test(raw) ? raw : `https://${raw}`
+      const parsed = new URL(candidate)
+      if (parsed.protocol === 'https:' || parsed.protocol === 'http:') return parsed.toString()
+    } catch { /* use the saved address as a Maps search */ }
+  }
+  const address = String(settings?.restaurant_address || '').trim()
+  return address ? `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(address)}` : ''
+}
 let menuViewRecordedForPageLoad = false
 
 export default function App() {
@@ -199,17 +218,8 @@ export default function App() {
   const allowedOwner = Boolean(session?.user?.email && session.user.email.toLowerCase() === ownerEmail && session.user.email_confirmed_at && isGoogleUser)
   const isAdminEntry = new URLSearchParams(window.location.search).get('admin') === '1'
 
-  // Keep an authenticated owner in the private admin area across navigation and reloads.
-  // Supabase persists the actual auth session; the URL flag only restores the admin route.
-  useEffect(() => {
-    if (!authReady || !allowedOwner) return
-    if (page !== 'admin') setPage('admin')
-    const currentUrl = new URL(window.location.href)
-    if (currentUrl.searchParams.get('admin') !== '1') {
-      currentUrl.searchParams.set('admin', '1')
-      window.history.replaceState({}, '', `${currentUrl.pathname}${currentUrl.search}${currentUrl.hash}`)
-    }
-  }, [authReady, allowedOwner, page])
+  // ?admin=1 opens the dashboard initially; an authenticated owner can move between
+  // the public menu and dashboard without losing the persisted Supabase session.
 
   const visibleCategories = categories.filter(c => c.is_visible !== false && c.is_published !== false).sort((a,b) => a.sort_order-b.sort_order)
   const shownProducts = useMemo(() => products.filter(p =>
@@ -222,9 +232,7 @@ export default function App() {
 
   const notify = (msg, kind) => {
     const rawMessage = String(msg ?? '')
-    const friendlyMessage = /[a-z]{3,}|\b(PGRST|SQLSTATE|JWT|HTTP)\b/i.test(rawMessage)
-      ? 'تعذر إتمام العملية حالياً. تحقق من الاتصال وحاول مرة أخرى.'
-      : rawMessage
+    const friendlyMessage = rawMessage
     const inferredKind = kind || (/تعذر|فشل|خطأ|يلزم|غير متاح|فارغة|أدخل|اختر|الحد الأقصى/i.test(friendlyMessage) ? 'error' : 'success')
     setNoticeKind(inferredKind)
     setNotice(friendlyMessage)
@@ -271,9 +279,10 @@ export default function App() {
         ? supabase.from('categories').update({ name, name_ar: categoryDraftAr.trim(), name_en: categoryDraftEn.trim() }).eq('id', editingCategory)
         : supabase.from('categories').insert(payload)
       const { error } = await query
-      if (error) return notify(error.message)
-      const { data } = await supabase.from('categories').select('*').order('sort_order')
-      if (data) setCategories(data)
+      if (error) return notify(`تعذر حفظ القسم: ${error.message}`, 'error')
+      const { data, error: reloadError } = await supabase.from('categories').select('*').order('sort_order')
+      if (reloadError) return notify(`تم الحفظ لكن تعذر تحديث قائمة الأقسام: ${reloadError.message}`, 'error')
+      setCategories(data || [])
     } else if (editingCategory) setCategories(prev => prev.map(c => c.id === editingCategory ? { ...c, ...payload } : c))
     else setCategories(prev => [...prev, { ...payload, id: crypto.randomUUID() }])
     setCategoryDraft(''); setCategoryDraftAr(''); setCategoryDraftEn(''); setEditingCategory(null); notify('تم حفظ القسم')
@@ -372,9 +381,13 @@ export default function App() {
       <div className="brand"><div className="brand-mark">{settings.logo_url?<img src={settings.logo_url} alt="logo"/>:<Utensils size={20}/>}</div><div><strong>{lang === 'ar' ? settings.restaurant_name : (settings.restaurant_name_en || settings.restaurant_name)}</strong><small>{text('القائمة الإلكترونية','Digital menu')}</small></div></div>
       <button className="outline-btn lang-toggle" onClick={() => setLang(lang === 'ar' ? 'en' : 'ar')}>{lang === 'ar' ? 'English' : 'العربية'}</button><nav className="top-nav">
         {allowedOwner ? <>
-          <button className="active" onClick={() => document.getElementById('settings-panel')?.scrollIntoView({behavior:'smooth'})}>لوحة الإدارة</button>
-          <button onClick={() => document.getElementById('products-panel')?.scrollIntoView({behavior:'smooth'})}>المنتجات</button>
-          <button onClick={() => document.getElementById('orders-panel')?.scrollIntoView({behavior:'smooth'})}>الطلبات</button>
+          <button className={page==='menu'?'active':''} onClick={()=>setPage('menu')}>المينيو</button>
+          <button className={page==='admin'?'active':''} onClick={()=>setPage('admin')}>لوحة الإدارة</button>
+          <button className={page==='cart'?'active':''} onClick={()=>setPage('cart')}>السلة <span className="count">{count}</span></button>
+          {page==='admin'&&<>
+            <button onClick={() => document.getElementById('products-panel')?.scrollIntoView({behavior:'smooth'})}>المنتجات</button>
+            <button onClick={() => document.getElementById('orders-panel')?.scrollIntoView({behavior:'smooth'})}>الطلبات</button>
+          </>}
         </> : <>
           <button className={page==='menu'?'active':''} onClick={()=>setPage('menu')}>المينيو</button>
           <button className={page==='cart'?'active':''} onClick={()=>setPage('cart')}>السلة <span className="count">{count}</span></button>
@@ -397,8 +410,8 @@ export default function App() {
       <footer className="footer"><div><strong>{settings.restaurant_name}</strong><p>نسعد بخدمتكم دائماً</p></div><div className="socials">
         {settings.facebook_enabled&&settings.facebook_url&&<a href={settings.facebook_url} target="_blank" rel="noreferrer" aria-label="Facebook"><Facebook/></a>}
         {settings.instagram_enabled&&settings.instagram_url&&<a href={settings.instagram_url} target="_blank" rel="noreferrer" aria-label="Instagram"><Instagram/></a>}
-        {settings.restaurant_location_url&&<a href={settings.restaurant_location_url} target="_blank" rel="noreferrer" aria-label="موقع المطعم" title="موقع المطعم"><MapPin/></a>}
-      </div><div className="footer-location">{settings.restaurant_address&&<small>{settings.restaurant_address}</small>}{settings.restaurant_location_url&&<a className="footer-map-link" href={settings.restaurant_location_url} target="_blank" rel="noreferrer"><MapPin size={16}/> موقع المطعم</a>}</div><small>Powered by MenuGo</small></footer>
+        {restaurantMapUrl(settings)&&<a href={restaurantMapUrl(settings)} target="_blank" rel="noreferrer" aria-label="موقع المطعم" title="موقع المطعم"><MapPin/></a>}
+      </div><div className="footer-location">{settings.restaurant_address&&<small>{settings.restaurant_address}</small>}{restaurantMapUrl(settings)&&<a className="footer-map-link" href={restaurantMapUrl(settings)} target="_blank" rel="noreferrer"><MapPin size={16}/> موقع المطعم</a>}</div><small>Powered by MenuGo</small></footer>
     </>}
 
     {page==='cart'&&<main className="content narrow"><div className="section-heading"><div><span className="eyebrow">YOUR ORDER</span><h2>سلة الطلبات</h2><p>راجع طلبك قبل الإرسال</p></div><button className="outline-btn" onClick={()=>setPage('menu')}>العودة للقائمة</button></div>
@@ -435,14 +448,14 @@ export default function App() {
         <div className="setting-row"><div><b>استقبال الطلبات داخل النظام</b><small>حفظ الطلبات في قاعدة البيانات لمتابعة حالتها</small></div><input type="checkbox" checked={!!settings.internal_orders_enabled} onChange={e=>updateSetting('internal_orders_enabled',e.target.checked)}/></div>
         <div className="social-setting"><div className="social-heading"><Facebook/><b>فيسبوك</b><input type="checkbox" checked={!!settings.facebook_enabled} onChange={e=>updateSetting('facebook_enabled',e.target.checked)}/></div>{settings.facebook_enabled&&<input value={settings.facebook_url||''} onChange={e=>updateSetting('facebook_url',e.target.value)} placeholder="رابط صفحة فيسبوك"/>}</div>
         <div className="social-setting"><div className="social-heading"><Instagram/><b>إنستغرام</b><input type="checkbox" checked={!!settings.instagram_enabled} onChange={e=>updateSetting('instagram_enabled',e.target.checked)}/></div>{settings.instagram_enabled&&<input value={settings.instagram_url||''} onChange={e=>updateSetting('instagram_url',e.target.value)} placeholder="رابط حساب إنستغرام"/>}</div>
-        <div className="social-setting location-setting"><div className="social-heading"><MapPin/><b>موقع المطعم على الخريطة</b></div><label className="single-field">عنوان المطعم<input value={settings.restaurant_address||''} onChange={e=>updateSetting('restaurant_address',e.target.value)} placeholder="المدينة، الشارع، رقم المبنى"/></label><label className="single-field">رابط Google Maps<input type="url" value={settings.restaurant_location_url||''} onChange={e=>updateSetting('restaurant_location_url',e.target.value)} placeholder="https://maps.google.com/..."/></label><small className="muted">انسخ رابط المشاركة من خرائط Google والصقه هنا. سيظهر زر الموقع للزوار عند إدخال الرابط.</small></div>
+        <div className="social-setting location-setting"><div className="social-heading"><MapPin/><b>موقع المطعم على الخريطة</b></div><label className="single-field">عنوان المطعم<input value={settings.restaurant_address||''} onChange={e=>updateSetting('restaurant_address',e.target.value)} placeholder="المدينة، الشارع، رقم المبنى"/></label><label className="single-field">رابط Google Maps<input type="url" value={settings.restaurant_location_url||''} onChange={e=>updateSetting('restaurant_location_url',e.target.value)} placeholder="https://maps.app.goo.gl/..."/></label><small className="muted">انسخ رابط المشاركة من خرائط Google والصقه هنا. سيظهر زر الموقع للزوار عند إدخال الرابط.</small></div>
         <button className="primary-btn" onClick={saveSettings}><Save size={17}/> حفظ الإعدادات</button>
       </section>
       <section id="categories-panel" className="admin-panel"><div className="panel-title"><Package/><div><h3>إدارة الأقسام</h3><p>أضف أقساماً غير محددة العدد ورتبها حسب قائمتك.</p></div></div><div className="inline-form"><input value={categoryDraftAr} onChange={e=>setCategoryDraftAr(e.target.value)} placeholder="اسم القسم بالعربية"/><input value={categoryDraftEn} onChange={e=>setCategoryDraftEn(e.target.value)} placeholder="Category name in English"/><button className="primary-btn" onClick={saveCategory}>{editingCategory?'تحديث القسم':'إضافة قسم'}</button>{editingCategory&&<button className="outline-btn" onClick={()=>{setEditingCategory(null);setCategoryDraft('');setCategoryDraftAr('');setCategoryDraftEn('')}}>إلغاء</button>}</div>
-        {categories.map(c=><div className="manage-row" key={c.id}><span>{c.name_ar || c.name} / {c.name_en || c.name}</span><button className="tiny-btn" onClick={()=>{setEditingCategory(c.id);setCategoryDraftAr(c.name_ar || c.name);setCategoryDraftEn(c.name_en || c.name)}}>تعديل</button><button className="tiny-btn" onClick={()=>moveCategory(c.id,-1)} title="تحريك لأعلى">↑</button><button className="tiny-btn" onClick={()=>moveCategory(c.id,1)} title="تحريك لأسفل">↓</button><button className="tiny-btn danger" onClick={()=>deleteCategory(c.id)}>حذف</button><button className="tiny-btn" onClick={async()=>{const v=!c.is_visible;if(supabase){const {error}=await supabase.from('categories').update({is_visible:v}).eq('id',c.id);if(error)return notify(error.message)}setCategories(prev=>prev.map(x=>x.id===c.id?{...x,is_visible:v}:x))}}>{c.is_visible===false?<EyeOff size={15}/>:<Eye size={15}/>}</button></div>)}
+        {categories.map(c=><div className="manage-row" key={c.id}><span>{categoryLabel(c)}</span><button className="tiny-btn" onClick={()=>{setEditingCategory(c.id);setCategoryDraftAr(c.name_ar || c.name);setCategoryDraftEn(c.name_en || c.name)}}>تعديل</button><button className="tiny-btn" onClick={()=>moveCategory(c.id,-1)} title="تحريك لأعلى">↑</button><button className="tiny-btn" onClick={()=>moveCategory(c.id,1)} title="تحريك لأسفل">↓</button><button className="tiny-btn danger" onClick={()=>deleteCategory(c.id)}>حذف</button><button className="tiny-btn" onClick={async()=>{const v=!c.is_visible;if(supabase){const {error}=await supabase.from('categories').update({is_visible:v}).eq('id',c.id);if(error)return notify(error.message)}setCategories(prev=>prev.map(x=>x.id===c.id?{...x,is_visible:v}:x))}}>{c.is_visible===false?<EyeOff size={15}/>:<Eye size={15}/>}</button></div>)}
       </section>
       <section id="products-panel" className="admin-panel"><div className="panel-title"><Utensils/><div><h3>إدارة المنتجات</h3><p>إضافة المنتجات وتعديل الأسعار والتوفر والصور.</p></div></div>
-        <div className="form-grid"><label>اسم المنتج بالعربية<input value={productDraft.name_ar} onChange={e=>setProductDraft({...productDraft,name_ar:e.target.value})}/></label><label>Product name (English)<input value={productDraft.name_en} onChange={e=>setProductDraft({...productDraft,name_en:e.target.value})}/></label><label>السعر<input type="number" min="0" step="0.01" value={productDraft.price} onChange={e=>setProductDraft({...productDraft,price:e.target.value})}/></label><label>القسم<select value={productDraft.category_id} onChange={e=>setProductDraft({...productDraft,category_id:e.target.value})}><option value="">اختر القسم</option>{categories.map(c=><option key={c.id} value={c.id}>{c.name_ar || c.name} / {c.name_en || c.name}</option>)}</select></label><label>صورة المنتج<input type="file" accept="image/png,image/jpeg,image/webp" onChange={e=>uploadImage(e.target.files?.[0],url=>setProductDraft(prev=>({...prev,image_url:url})))}/>{productDraft.image_url&&<img className="admin-image-preview" src={productDraft.image_url} alt="معاينة"/>}{uploading&&<small>جارٍ رفع الصورة...</small>}</label><label>الوصف بالعربية<textarea value={productDraft.description_ar} onChange={e=>setProductDraft({...productDraft,description_ar:e.target.value})}/></label><label>Description (English)<textarea value={productDraft.description_en} onChange={e=>setProductDraft({...productDraft,description_en:e.target.value})}/></label></div>
+        <div className="form-grid"><label>اسم المنتج بالعربية<input value={productDraft.name_ar} onChange={e=>setProductDraft({...productDraft,name_ar:e.target.value})}/></label><label>Product name (English)<input value={productDraft.name_en} onChange={e=>setProductDraft({...productDraft,name_en:e.target.value})}/></label><label>السعر<input type="number" min="0" step="0.01" value={productDraft.price} onChange={e=>setProductDraft({...productDraft,price:e.target.value})}/></label><label>القسم<select value={productDraft.category_id} onChange={e=>setProductDraft({...productDraft,category_id:e.target.value})}><option value="">اختر القسم</option>{categories.map(c=><option key={c.id} value={c.id}>{categoryLabel(c)}</option>)}</select></label><label>صورة المنتج<input type="file" accept="image/png,image/jpeg,image/webp" onChange={e=>uploadImage(e.target.files?.[0],url=>setProductDraft(prev=>({...prev,image_url:url})))}/>{productDraft.image_url&&<img className="admin-image-preview" src={productDraft.image_url} alt="معاينة"/>}{uploading&&<small>جارٍ رفع الصورة...</small>}</label><label>الوصف بالعربية<textarea value={productDraft.description_ar} onChange={e=>setProductDraft({...productDraft,description_ar:e.target.value})}/></label><label>Description (English)<textarea value={productDraft.description_en} onChange={e=>setProductDraft({...productDraft,description_en:e.target.value})}/></label></div>
         <div className="check-line"><label><input type="checkbox" checked={!!productDraft.is_available} onChange={e=>setProductDraft({...productDraft,is_available:e.target.checked})}/> متوفر</label><label><input type="checkbox" checked={!!productDraft.is_featured} onChange={e=>setProductDraft({...productDraft,is_featured:e.target.checked})}/> منتج مميز</label></div>
         <button className="primary-btn" onClick={saveProduct}>{editingProduct?'تحديث المنتج':'إضافة المنتج'}</button>
         {products.map(p=><div className="manage-row" key={p.id}><span><b>{p.name_ar || p.name} / {p.name_en || p.name}</b><small>{money(p.price,settings.currency)}</small></span><button className="tiny-btn" onClick={()=>{setEditingProduct(p.id);setProductDraft({...emptyProduct,...p,name_ar:p.name_ar||p.name,name_en:p.name_en||p.name,description_ar:p.description_ar||p.description,description_en:p.description_en||p.description,price:String(p.price)})}}>تعديل</button><button className="tiny-btn" onClick={async()=>{const v=p.is_published===false;const {error}=await supabase.from('products').update({is_published:v}).eq('id',p.id);if(error)return notify(error.message);setProducts(prev=>prev.map(x=>x.id===p.id?{...x,is_published:v}:x))}}>{p.is_published===false?<EyeOff size={15}/>:<Eye size={15}/>}</button><button className="tiny-btn danger" onClick={()=>deleteProduct(p.id)}>حذف</button></div>)}
