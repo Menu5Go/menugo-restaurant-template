@@ -30,6 +30,7 @@ const arabicValue = (value) => {
   return /[\u0600-\u06FF]/.test(result) ? result : ''
 }
 const categoryLabel = (category) => arabicValue(category?.name_ar) || arabicValue(category?.name)
+const isUuid = (value) => typeof value === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value)
 
 const validCoordinates = (latValue, lonValue) => {
   const lat = Number(latValue)
@@ -99,8 +100,8 @@ export default function App() {
   const [reviews, setReviews] = useState([])
   const [reviewDraft, setReviewDraft] = useState({ product: null, rating: 5, comment: '' })
   const [uploading, setUploading] = useState(false)
-  const [categories, setCategories] = useState(demoCategories)
-  const [products, setProducts] = useState(demoProducts)
+  const [categories, setCategories] = useState(() => supabase ? [] : demoCategories)
+  const [products, setProducts] = useState(() => supabase ? [] : demoProducts)
   const [cart, setCart] = useState([])
   const [activeCategory, setActiveCategory] = useState(() => readSavedMenuPosition()?.activeCategory || 'all')
   const [search, setSearch] = useState(() => readSavedMenuPosition()?.search || '')
@@ -113,6 +114,7 @@ export default function App() {
   const [notice, setNotice] = useState('')
   const [noticeKind, setNoticeKind] = useState('success')
   const [confirmDialog, setConfirmDialog] = useState(null)
+  const [confirmBusy, setConfirmBusy] = useState(false)
   const [productDraft, setProductDraft] = useState(emptyProduct)
   const [editingProduct, setEditingProduct] = useState(null)
   const [editingCategory, setEditingCategory] = useState(null)
@@ -267,10 +269,12 @@ export default function App() {
     notify('تمت إضافة الطاولة ورمزها الثابت')
   }
   const deleteRestaurantTable = async (table) => {
+    if (!isUuid(table?.id)) { notify('تعذر حذف الطاولة: معرّف الطاولة غير صالح.', 'error'); return false }
     const { error } = await supabase.from('restaurant_tables').delete().eq('id', table.id)
-    if (error) return notify(`تعذر حذف الطاولة: ${error.message}`)
+    if (error) { notify(`تعذر حذف الطاولة: ${error.message}`, 'error'); return false }
     await loadRestaurantTables()
     notify('تم حذف الطاولة')
+    return true
   }
   const printTableQr = (table) => {
     const image = tableQrImages[table.id]
@@ -352,8 +356,20 @@ export default function App() {
       ])
       if (!alive) return
       if (s.data) setSettings({ ...initialSettings, ...s.data })
-      if (c.data?.length) setCategories(c.data)
-      if (p.data) setProducts(p.data)
+      // With Supabase configured, never retain demo records (their IDs such as "cold"
+      // are labels, not UUIDs accepted by PostgreSQL).
+      if (c.error) {
+        setCategories([])
+        console.error('تعذر تحميل الأقسام:', c.error)
+      } else {
+        setCategories(c.data || [])
+      }
+      if (p.error) {
+        setProducts([])
+        console.error('تعذر تحميل المنتجات:', p.error)
+      } else {
+        setProducts(p.data || [])
+      }
       setMenuDataReady(true)
     })()
     return () => { alive = false }
@@ -531,6 +547,7 @@ export default function App() {
     if (!name) return notify('أدخل اسم القسم')
     const payload = { name, name_ar: name, sort_order: categories.length + 1, is_visible: true, is_published: true }
     if (supabase) {
+      if (editingCategory && !isUuid(editingCategory)) return notify('تعذر تعديل القسم: معرّف القسم غير صالح. حدّث الصفحة ثم حاول مجدداً.', 'error')
       const query = editingCategory
         ? supabase.from('categories').update({ name, name_ar: name }).eq('id', editingCategory)
         : supabase.from('categories').insert(payload)
@@ -550,11 +567,13 @@ export default function App() {
       confirmLabel: 'نعم، احذف القسم',
       onConfirm: async () => {
     if (supabase) {
+      if (!isUuid(id)) { notify('تعذر حذف القسم: معرّف القسم غير صالح. حدّث الصفحة ثم حاول مجدداً.', 'error'); return false }
       const { error } = await supabase.from('categories').delete().eq('id', id)
-      if (error) return notify(error.message)
+      if (error) { notify(`تعذر حذف القسم: ${error.message}`, 'error'); return false }
     }
     setCategories(prev => prev.filter(c => c.id !== id)); setProducts(prev => prev.filter(p => p.category_id !== id))
     notify('تم حذف القسم')
+    return true
       }
     })
   }
@@ -562,6 +581,8 @@ export default function App() {
     if (!productDraft.name_ar.trim() || !productDraft.category_id || productDraft.price === '') return notify('أكمل اسم المنتج والقسم والسعر')
     const payload = { name: productDraft.name_ar.trim(), name_ar: productDraft.name_ar.trim(), description: productDraft.description_ar || '', description_ar: productDraft.description_ar || '', price: Number(productDraft.price), category_id: productDraft.category_id, image_url: productDraft.image_url, is_available: productDraft.is_available, is_featured: productDraft.is_featured, is_published: true }
     if (supabase) {
+      if (editingProduct && !isUuid(editingProduct)) return notify('تعذر تعديل المنتج: معرّف المنتج غير صالح. حدّث الصفحة ثم حاول مجدداً.', 'error')
+      if (!isUuid(productDraft.category_id)) return notify('تعذر حفظ المنتج: اختر قسماً صالحاً من قاعدة البيانات.', 'error')
       const query = editingProduct
         ? supabase.from('products').update(payload).eq('id', editingProduct)
         : supabase.from('products').insert(payload)
@@ -580,10 +601,12 @@ export default function App() {
       confirmLabel: 'نعم، احذف المنتج',
       onConfirm: async () => {
     if (supabase) {
+      if (!isUuid(id)) { notify('تعذر حذف المنتج: معرّف المنتج غير صالح. حدّث الصفحة ثم حاول مجدداً.', 'error'); return false }
       const { error } = await supabase.from('products').delete().eq('id', id)
-      if (error) return notify(error.message)
+      if (error) { notify(`تعذر حذف المنتج: ${error.message}`, 'error'); return false }
     }
     setProducts(prev => prev.filter(p => p.id !== id)); notify('تم حذف المنتج')
+    return true
       }
     })
   }
@@ -738,14 +761,14 @@ export default function App() {
       <span>{notice}</span>
       <button className="toast-close" onClick={()=>setNotice('')} aria-label="إغلاق الإشعار"><X size={16}/></button>
     </div>}
-    {confirmDialog&&<div className="confirm-backdrop" role="presentation" onMouseDown={e=>{if(e.target===e.currentTarget)setConfirmDialog(null)}}>
+    {confirmDialog&&<div className="confirm-backdrop" role="presentation" onMouseDown={e=>{if(e.target===e.currentTarget&&!confirmBusy){setConfirmDialog(null);setConfirmBusy(false)}}}>
       <section className="confirm-dialog" role="alertdialog" aria-modal="true" aria-labelledby="confirm-title" aria-describedby="confirm-message">
         <div className="confirm-icon"><ShieldAlert size={25}/></div>
         <h3 id="confirm-title">{confirmDialog.title}</h3>
         <p id="confirm-message">{confirmDialog.message}</p>
         <div className="confirm-actions">
-          <button className="outline-btn" onClick={()=>setConfirmDialog(null)}>إلغاء</button>
-          <button className="confirm-danger" onClick={async()=>{const action=confirmDialog.onConfirm;setConfirmDialog(null);await action()}}>{confirmDialog.confirmLabel || 'تأكيد الحذف'}</button>
+          <button className="outline-btn" disabled={confirmBusy} onClick={()=>{setConfirmDialog(null);setConfirmBusy(false)}}>إلغاء</button>
+          <button className="confirm-danger" disabled={confirmBusy} aria-busy={confirmBusy} onClick={async()=>{if(confirmBusy)return;setConfirmBusy(true);try{const result=await confirmDialog.onConfirm();if(result!==false)setConfirmDialog(null)}catch(error){notify(`تعذر تنفيذ العملية: ${error?.message || 'حدث خطأ غير متوقع'}`,'error')}finally{setConfirmBusy(false)}}}>{confirmBusy?'جارٍ التنفيذ...':(confirmDialog.confirmLabel || 'تأكيد الحذف')}</button>
         </div>
       </section>
     </div>}
