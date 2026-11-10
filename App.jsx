@@ -1,7 +1,7 @@
-import React, { useEffect, useMemo, useState } from 'react'
+import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { supabase, isSupabaseConfigured, ownerEmail } from './supabase.js'
 import { money, whatsappUrl } from './format.js'
-import { Menu, ShoppingBag, Search, Plus, Minus, Trash2, Settings, LogIn, LogOut, Package, QrCode, ExternalLink, Eye, EyeOff, Save, X, Instagram, Facebook, MapPin, Coffee, Utensils, ChevronDown, CheckCircle2, AlertCircle, ShieldAlert } from 'lucide-react'
+import { Menu, ShoppingCart, Search, Plus, Minus, Trash2, SlidersHorizontal, LogIn, LogOut, Tags, ClipboardList, QrCode, Eye, EyeOff, Save, X, Instagram, Facebook, MapPinned, Coffee, UtensilsCrossed, ChevronDown, CheckCircle2, AlertCircle, ShieldAlert, Store, Star, Sparkles, ArrowUp, ArrowDown } from 'lucide-react'
 
 const demoCategories = [
   { id: 'hot', name: 'مشروبات ساخنة', sort_order: 1, is_visible: true },
@@ -18,19 +18,62 @@ const demoProducts = [
 const initialSettings = {
   restaurant_name: 'مطعم MenuGo', tagline: 'أهلاً وسهلاً بكم', currency: 'EUR',
   whatsapp_enabled: false, whatsapp_number: '', internal_orders_enabled: false,
+  order_sound_enabled: false, order_status_enabled: true,
   facebook_enabled: false, facebook_url: '', instagram_enabled: false, instagram_url: '',
-  restaurant_address: '', restaurant_location_url: '',
+  restaurant_address: '', restaurant_location_url: '', restaurant_latitude: '', restaurant_longitude: '',
   primary_color: '#1d4738', logo_url: '', cover_url: ''
 }
-const emptyProduct = { name: '', name_ar: '', name_en: '', description: '', description_ar: '', description_en: '', price: '', category_id: '', image_url: '', is_available: true, is_featured: false }
+const emptyProduct = { name: '', name_ar: '', description: '', description_ar: '', price: '', category_id: '', image_url: '', is_available: true, is_featured: false }
 
-const categoryLabel = (category) => {
-  const ar = String(category?.name_ar || category?.name || '').trim()
-  const en = String(category?.name_en || '').trim()
-  return en && en !== ar ? `${ar} / ${en}` : (ar || en)
+const arabicValue = (value) => {
+  const result = String(value || '').trim()
+  return /[\u0600-\u06FF]/.test(result) ? result : ''
+}
+const categoryLabel = (category) => arabicValue(category?.name_ar) || arabicValue(category?.name)
+
+const validCoordinates = (latValue, lonValue) => {
+  const lat = Number(latValue)
+  const lon = Number(lonValue)
+  if (!Number.isFinite(lat) || !Number.isFinite(lon) || lat < -90 || lat > 90 || lon < -180 || lon > 180) return null
+  return { lat, lon }
+}
+
+const coordinatesFromMapLink = (value) => {
+  const raw = String(value || '').trim()
+  if (!raw) return null
+  let decoded = raw
+  try { decoded = decodeURIComponent(raw) } catch { /* inspect the original URL */ }
+  const patterns = [
+    /!3d(-?\d+(?:\.\d+)?)!4d(-?\d+(?:\.\d+)?)/i,
+    /@(-?\d+(?:\.\d+)?),\s*(-?\d+(?:\.\d+)?)/i,
+    /[?&](?:q|query|destination|ll|center)=(-?\d+(?:\.\d+)?)(?:,|%2c)(-?\d+(?:\.\d+)?)/i,
+    /^\s*(-?\d{1,2}\.\d{3,})\s*,\s*(-?\d{1,3}\.\d{3,})\s*$/
+  ]
+  for (const pattern of patterns) {
+    const match = decoded.match(pattern)
+    if (match) {
+      const coordinates = validCoordinates(match[1], match[2])
+      if (coordinates) return coordinates
+    }
+  }
+  return null
+}
+
+const restaurantCoordinates = (settings) => {
+  const rawLat = settings?.restaurant_latitude
+  const rawLon = settings?.restaurant_longitude
+  if (rawLat !== '' && rawLat != null && rawLon !== '' && rawLon != null) {
+    const coordinates = validCoordinates(rawLat, rawLon)
+    if (coordinates) return coordinates
+  }
+  return coordinatesFromMapLink(settings?.restaurant_location_url)
 }
 
 const restaurantMapUrl = (settings) => {
+  const coordinates = restaurantCoordinates(settings)
+  if (coordinates) {
+    return `https://www.google.com/maps/search/?api=1&query=${coordinates.lat},${coordinates.lon}`
+  }
   const raw = String(settings?.restaurant_location_url || '').trim()
   if (raw) {
     try {
@@ -43,12 +86,15 @@ const restaurantMapUrl = (settings) => {
   return address ? `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(address)}` : ''
 }
 let menuViewRecordedForPageLoad = false
+const MENU_POSITION_KEY = 'menugo_menu_position_v1'
+const readSavedMenuPosition = () => {
+  try { return JSON.parse(sessionStorage.getItem(MENU_POSITION_KEY) || 'null') }
+  catch { return null }
+}
 
 export default function App() {
   const [settings, setSettings] = useState(initialSettings)
-  const [lang, setLang] = useState(() => localStorage.getItem('menugo_lang') || 'ar')
   const [categoryDraftAr, setCategoryDraftAr] = useState('')
-  const [categoryDraftEn, setCategoryDraftEn] = useState('')
   const [orders, setOrders] = useState([])
   const [reviews, setReviews] = useState([])
   const [reviewDraft, setReviewDraft] = useState({ product: null, rating: 5, comment: '' })
@@ -56,8 +102,10 @@ export default function App() {
   const [categories, setCategories] = useState(demoCategories)
   const [products, setProducts] = useState(demoProducts)
   const [cart, setCart] = useState([])
-  const [activeCategory, setActiveCategory] = useState('all')
-  const [search, setSearch] = useState('')
+  const [activeCategory, setActiveCategory] = useState(() => readSavedMenuPosition()?.activeCategory || 'all')
+  const [search, setSearch] = useState(() => readSavedMenuPosition()?.search || '')
+  const [menuDataReady, setMenuDataReady] = useState(!supabase)
+  const menuRestoreApplied = useRef(false)
   const [page, setPage] = useState(() => new URLSearchParams(window.location.search).get('admin') === '1' ? 'admin' : 'menu')
   const [session, setSession] = useState(null)
   const [authReady, setAuthReady] = useState(false)
@@ -66,30 +114,41 @@ export default function App() {
   const [noticeKind, setNoticeKind] = useState('success')
   const [confirmDialog, setConfirmDialog] = useState(null)
   const [productDraft, setProductDraft] = useState(emptyProduct)
-  const [categoryDraft, setCategoryDraft] = useState('')
   const [editingProduct, setEditingProduct] = useState(null)
   const [editingCategory, setEditingCategory] = useState(null)
   const [orderNote, setOrderNote] = useState('')
   const [qrData, setQrData] = useState('')
   const [qrImage, setQrImage] = useState('')
+  const [restaurantTables, setRestaurantTables] = useState([])
+  const [tableDraft, setTableDraft] = useState('')
+  const [tableQrImages, setTableQrImages] = useState({})
+  const [activeRestaurantTable, setActiveRestaurantTable] = useState(null)
+  const [activeQrIsGeneral, setActiveQrIsGeneral] = useState(false)
+  const [tableLoading, setTableLoading] = useState(false)
   const [analytics, setAnalytics] = useState(null)
   const [analyticsLoading, setAnalyticsLoading] = useState(false)
+  const [distanceLoading, setDistanceLoading] = useState(false)
+  const [distanceInfo, setDistanceInfo] = useState(null)
+  const seenOrderIdsRef = useRef(null)
 
-  const text = (ar, en) => lang === 'ar' ? ar : en
-  const localized = (item, base) => lang === 'ar'
-    ? (item?.[`${base}_ar`] || item?.[base] || item?.[`${base}_en`] || '')
-    : (item?.[`${base}_en`] || item?.[base] || item?.[`${base}_ar`] || '')
-  useEffect(() => {
-    localStorage.setItem('menugo_lang', lang)
-    document.documentElement.lang = lang
-    document.documentElement.dir = lang === 'ar' ? 'rtl' : 'ltr'
-  }, [lang])
+  const localized = (item, base) => arabicValue(item?.[`${base}_ar`]) || arabicValue(item?.[base])
 
   useEffect(() => {
     if (!supabase) return
     supabase.auth.getSession().then(({ data }) => { setSession(data.session); setAuthReady(true) })
     const { data: listener } = supabase.auth.onAuthStateChange((_event, next) => { setSession(next); setAuthReady(true) })
     return () => listener.subscription.unsubscribe()
+  }, [])
+
+  // ربط رمز QR بالطاولة تلقائياً من قاعدة البيانات.
+  useEffect(() => {
+    const token = new URLSearchParams(window.location.search).get('table')
+    if (!token || !supabase) return
+    supabase.rpc('menugo_get_table_by_token', { p_token: token }).then(({ data, error }) => {
+      if (error || !data) { notify('رمز الطاولة غير صالح أو لم يعد متاحاً'); return }
+      setActiveQrIsGeneral(Boolean(data.is_general))
+      setActiveRestaurantTable(data.is_general ? null : data)
+    })
   }, [])
 
   // هوية عشوائية محلية لتمييز الزائر الفريد دون تخزين اسمه أو بريده أو عنوان IP.
@@ -115,7 +174,8 @@ export default function App() {
     loadAnalytics()
     loadOrders()
     loadReviews()
-  }, [page, session, lang, products])
+    loadRestaurantTables()
+  }, [page, session, products])
 
   const trackProductView = (productId) => {
     if (!supabase) return
@@ -134,6 +194,91 @@ export default function App() {
     const { data, error } = await supabase.from('orders').select('*').order('created_at', { ascending: false }).limit(200)
     if (error) return notify(`تعذر تحميل الطلبات: ${error.message}`)
     setOrders(data || [])
+    seenOrderIdsRef.current = new Set((data || []).map(order => order.id))
+  }
+  const playNewOrderSound = () => {
+    try {
+      const AudioContextClass = window.AudioContext || window.webkitAudioContext
+      if (!AudioContextClass) return
+      const context = new AudioContextClass()
+      const oscillator = context.createOscillator()
+      const gain = context.createGain()
+      oscillator.type = 'sine'
+      oscillator.frequency.setValueAtTime(880, context.currentTime)
+      oscillator.frequency.setValueAtTime(1175, context.currentTime + 0.16)
+      gain.gain.setValueAtTime(0.0001, context.currentTime)
+      gain.gain.exponentialRampToValueAtTime(0.22, context.currentTime + 0.025)
+      gain.gain.exponentialRampToValueAtTime(0.0001, context.currentTime + 0.42)
+      oscillator.connect(gain)
+      gain.connect(context.destination)
+      oscillator.start()
+      oscillator.stop(context.currentTime + 0.44)
+      oscillator.onended = () => context.close()
+    } catch (error) {
+      console.warn('تعذر تشغيل تنبيه الطلب:', error)
+    }
+  }
+
+  // فحص الطلبات الجديدة دورياً حتى يعمل التنبيه حتى دون إعداد Realtime في قاعدة البيانات.
+  useEffect(() => {
+    if (!supabase || page !== 'admin' || !allowedOwner) return
+    let active = true
+    const checkForNewOrders = async () => {
+      const { data, error } = await supabase.from('orders').select('*').order('created_at', { ascending: false }).limit(200)
+      if (!active || error) return
+      const nextOrders = data || []
+      const nextIds = new Set(nextOrders.map(order => order.id))
+      if (seenOrderIdsRef.current) {
+        const hasNewOrder = nextOrders.some(order => !seenOrderIdsRef.current.has(order.id))
+        if (hasNewOrder && settings.order_sound_enabled) playNewOrderSound()
+      }
+      seenOrderIdsRef.current = nextIds
+      setOrders(nextOrders)
+    }
+    const interval = window.setInterval(checkForNewOrders, 8000)
+    return () => { active = false; window.clearInterval(interval) }
+  }, [page, session, settings.order_sound_enabled])
+
+  const loadRestaurantTables = async () => {
+    if (!supabase || !allowedOwner) return
+    setTableLoading(true)
+    const { data, error } = await supabase.from('restaurant_tables').select('*').order('is_general', { ascending: false }).order('created_at')
+    setTableLoading(false)
+    if (error) return notify(`تعذر تحميل رموز الطاولات: ${error.message}`)
+    setRestaurantTables(data || [])
+    const QRCode = (await import('qrcode')).default
+    const baseUrl = import.meta.env.VITE_PUBLIC_MENU_URL || new URL(import.meta.env.BASE_URL || '/', window.location.origin).toString()
+    const images = {}
+    for (const table of (data || [])) {
+      const url = new URL(baseUrl, window.location.origin)
+      url.searchParams.set('source', 'qr')
+      url.searchParams.set('table', table.qr_token)
+      images[table.id] = await QRCode.toDataURL(url.toString(), { width: 420, margin: 2 })
+    }
+    setTableQrImages(images)
+  }
+  const addRestaurantTable = async () => {
+    const name = tableDraft.trim()
+    if (!name) return notify('أدخل اسم الطاولة')
+    const { error } = await supabase.from('restaurant_tables').insert({ table_name: name })
+    if (error) return notify(`تعذر إضافة الطاولة: ${error.message}`)
+    setTableDraft('')
+    await loadRestaurantTables()
+    notify('تمت إضافة الطاولة ورمزها الثابت')
+  }
+  const deleteRestaurantTable = async (table) => {
+    const { error } = await supabase.from('restaurant_tables').delete().eq('id', table.id)
+    if (error) return notify(`تعذر حذف الطاولة: ${error.message}`)
+    await loadRestaurantTables()
+    notify('تم حذف الطاولة')
+  }
+  const printTableQr = (table) => {
+    const image = tableQrImages[table.id]
+    if (!image) return notify('رمز QR غير جاهز للطباعة')
+    const popup = window.open('', '_blank', 'width=600,height=700')
+    if (!popup) return notify('اسمح بفتح النوافذ المنبثقة للطباعة')
+    popup.document.write(`<html lang="ar" dir="rtl"><head><title>رمز الطاولة</title><style>body{font-family:Arial;text-align:center;padding:30px}img{width:320px;max-width:90%}</style></head><body><h2>${String(table.table_name).replace(/[&<>"]/g, '')}</h2><img src="${image}"/><script>window.onload=()=>window.print()<\/script></body></html>`)
+    popup.document.close()
   }
   const loadReviews = async () => {
     if (!supabase || !allowedOwner) return
@@ -148,7 +293,7 @@ export default function App() {
   }
   const uploadImage = async (file, onUploaded) => {
     if (!supabase || !allowedOwner) return notify('يلزم تسجيل دخول المدير وتهيئة Supabase')
-    if (!file || !['image/jpeg','image/png','image/webp'].includes(file.type)) return notify('اختر صورة JPG أو PNG أو WebP')
+    if (!file || !['image/jpeg','image/png','image/webp'].includes(file.type)) return notify('اختر صورة بصيغة JPG أو PNG أو WebP')
     if (file.size > 5 * 1024 * 1024) return notify('الحد الأقصى لحجم الصورة 5MB')
     setUploading(true)
     const ext = file.type === 'image/png' ? 'png' : file.type === 'image/webp' ? 'webp' : 'jpg'
@@ -181,11 +326,11 @@ export default function App() {
     if (error) return notify(`تعذر تحميل الإحصائيات: ${error.message}`)
     const stats = data || {}
     const daily = (stats.daily || []).map(item => ({
-      label: new Date(`${item.day}T12:00:00`).toLocaleDateString(lang === 'ar' ? 'ar' : 'en', { weekday: 'short', day: 'numeric' }),
+      label: new Date(`${item.day}T12:00:00`).toLocaleDateString('ar', { weekday: 'short', day: 'numeric' }),
       visits: Number(item.visits || 0)
     }))
     const topProducts = (stats.top_products || []).map(item => ({
-      name: products.find(p => p.id === item.product_id) ? localized(products.find(p => p.id === item.product_id), 'name') : text('منتج محذوف', 'Deleted product'),
+      name: products.find(p => p.id === item.product_id) ? localized(products.find(p => p.id === item.product_id), 'name') : 'منتج محذوف',
       views: Number(item.views || 0)
     }))
     setAnalytics({
@@ -209,9 +354,53 @@ export default function App() {
       if (s.data) setSettings({ ...initialSettings, ...s.data })
       if (c.data?.length) setCategories(c.data)
       if (p.data) setProducts(p.data)
+      setMenuDataReady(true)
     })()
     return () => { alive = false }
   }, [session])
+
+  // حفظ القسم والبحث وموضع التمرير حتى يعود الزائر إلى نفس مكانه بعد تحديث الصفحة.
+  useEffect(() => {
+    if (page !== 'menu') return
+    const savePosition = () => {
+      try {
+        sessionStorage.setItem(MENU_POSITION_KEY, JSON.stringify({
+          activeCategory,
+          search,
+          scrollY: window.scrollY
+        }))
+      } catch { /* قد يكون تخزين الجلسة معطلاً في المتصفح */ }
+    }
+    let frame = 0
+    const onScroll = () => {
+      if (frame) return
+      frame = window.requestAnimationFrame(() => {
+        frame = 0
+        savePosition()
+      })
+    }
+    window.addEventListener('scroll', onScroll, { passive: true })
+    window.addEventListener('pagehide', savePosition)
+    return () => {
+      savePosition()
+      window.removeEventListener('scroll', onScroll)
+      window.removeEventListener('pagehide', savePosition)
+      if (frame) window.cancelAnimationFrame(frame)
+    }
+  }, [page, activeCategory, search])
+
+  useEffect(() => {
+    if (page !== 'menu' || !menuDataReady || menuRestoreApplied.current) return
+    const saved = readSavedMenuPosition()
+    if (!saved) { menuRestoreApplied.current = true; return }
+    menuRestoreApplied.current = true
+    const firstFrame = window.requestAnimationFrame(() => {
+      window.requestAnimationFrame(() => {
+        window.scrollTo({ top: Math.max(0, Number(saved.scrollY) || 0), behavior: 'auto' })
+      })
+    })
+    return () => window.cancelAnimationFrame(firstFrame)
+  }, [page, menuDataReady])
 
   const userProviders = session?.user?.app_metadata?.providers || []
   const isGoogleUser = session?.user?.app_metadata?.provider === 'google' || userProviders.includes('google')
@@ -226,7 +415,7 @@ export default function App() {
     p.is_available !== false && p.is_published !== false &&
     (activeCategory === 'all' || p.category_id === activeCategory) &&
     (`${localized(p,'name')} ${localized(p,'description')}`).toLowerCase().includes(search.toLowerCase())
-  ), [products, activeCategory, search, lang])
+  ), [products, activeCategory, search])
   const total = cart.reduce((sum, item) => sum + Number(item.price) * item.quantity, 0)
   const count = cart.reduce((sum, item) => sum + item.quantity, 0)
 
@@ -245,13 +434,80 @@ export default function App() {
   const updateSetting = (key, value) => setSettings(prev => ({ ...prev, [key]: value }))
   const addToCart = (product) => setCart(prev => {
     const found = prev.find(x => x.id === product.id)
-    return found ? prev.map(x => x.id === product.id ? { ...x, quantity: x.quantity + 1 } : x) : [...prev, { ...product, quantity: 1 }]
+    const arabicProduct = { ...product, name: localized(product, 'name'), description: localized(product, 'description') }
+    return found ? prev.map(x => x.id === product.id ? { ...x, quantity: x.quantity + 1 } : x) : [...prev, { ...arabicProduct, quantity: 1 }]
   })
   const changeQty = (id, delta) => setCart(prev => prev.map(x => x.id === id ? { ...x, quantity: x.quantity + delta } : x).filter(x => x.quantity > 0))
   const saveSettings = async () => {
     if (!supabase) return notify('أضف إعدادات Supabase في ملف .env أولاً')
-    const { error } = await supabase.from('restaurant_settings').upsert({ ...settings, id: 1 })
+    const rawLat = settings.restaurant_latitude
+    const rawLon = settings.restaurant_longitude
+    const hasLat = rawLat !== '' && rawLat != null
+    const hasLon = rawLon !== '' && rawLon != null
+    if (hasLat !== hasLon) return notify('أدخل خط العرض وخط الطول معاً')
+    const latitude = hasLat ? Number(rawLat) : null
+    const longitude = hasLon ? Number(rawLon) : null
+    if (hasLat && (!Number.isFinite(latitude) || latitude < -90 || latitude > 90 || !Number.isFinite(longitude) || longitude < -180 || longitude > 180)) {
+      return notify('إحداثيات الموقع غير صحيحة؛ تحقق من خط العرض والطول')
+    }
+    const { error } = await supabase.from('restaurant_settings').upsert({
+      ...settings, restaurant_latitude: latitude, restaurant_longitude: longitude, id: 1
+    })
     notify(error ? `تعذر الحفظ: ${error.message}` : 'تم حفظ إعدادات المطعم')
+  }
+  const calculateRestaurantDistance = async () => {
+    const destination = restaurantCoordinates(settings)
+    if (!destination) {
+      setDistanceInfo({ kind: 'error', text: 'أضف إحداثيات المطعم من لوحة الإدارة لحساب المسافة بدقة.' })
+      return
+    }
+    if (!navigator.geolocation) {
+      setDistanceInfo({ kind: 'error', text: 'متصفحك لا يدعم تحديد الموقع.' })
+      return
+    }
+    setDistanceLoading(true)
+    setDistanceInfo({ kind: 'loading', text: 'جارٍ تحديد موقعك وحساب مسافة الطريق...' })
+    try {
+      const position = await new Promise((resolve, reject) => {
+        navigator.geolocation.getCurrentPosition(resolve, reject, {
+          enableHighAccuracy: true, timeout: 15000, maximumAge: 60000
+        })
+      })
+      const response = await fetch('https://valhalla1.openstreetmap.de/route', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Accept': 'application/json',
+          'X-Client-Id': 'menu5go.github.io'
+        },
+        body: JSON.stringify({
+          locations: [
+            { lat: position.coords.latitude, lon: position.coords.longitude },
+            { lat: destination.lat, lon: destination.lon }
+          ],
+          costing: 'auto',
+          units: 'kilometers'
+        })
+      })
+      if (!response.ok) throw new Error('تعذر الاتصال بخدمة حساب المسار')
+      const result = await response.json()
+      const kilometers = Number(result?.trip?.summary?.length)
+      if (result?.trip?.status !== 0 || !Number.isFinite(kilometers) || kilometers < 0) {
+        throw new Error('لم يتم العثور على طريق مناسب بين موقعك والمطعم')
+      }
+      const formattedDistance = kilometers < 1
+        ? `${Math.max(10, Math.round(kilometers * 1000 / 10) * 10)} متر`
+        : `${kilometers.toLocaleString('ar', { maximumFractionDigits: 1 })} كم`
+      setDistanceInfo({ kind: 'success', text: `يبعد المطعم عنك ${formattedDistance} بالسيارة` })
+    } catch (error) {
+      let message = error?.message || 'تعذر حساب المسافة حالياً.'
+      if (error?.code === 1) message = 'لم تسمح بتحديد موقعك. فعّل إذن الموقع ثم حاول مجدداً.'
+      else if (error?.code === 2) message = 'تعذر تحديد موقعك الحالي. تحقق من تشغيل خدمة الموقع.'
+      else if (error?.code === 3) message = 'انتهت مهلة تحديد موقعك. حاول مجدداً.'
+      setDistanceInfo({ kind: 'error', text: message })
+    } finally {
+      setDistanceLoading(false)
+    }
   }
   const moveCategory = async (id, delta) => {
     const sorted = [...categories].sort((a,b)=>a.sort_order-b.sort_order)
@@ -271,12 +527,12 @@ export default function App() {
     }
   }
   const saveCategory = async () => {
-    const name = categoryDraftAr.trim() || categoryDraftEn.trim()
-    if (!categoryDraftAr.trim() || !categoryDraftEn.trim()) return notify('أدخل اسم القسم بالعربية والإنجليزية')
-    const payload = { name, name_ar: categoryDraftAr.trim(), name_en: categoryDraftEn.trim(), sort_order: categories.length + 1, is_visible: true, is_published: true }
+    const name = categoryDraftAr.trim()
+    if (!name) return notify('أدخل اسم القسم')
+    const payload = { name, name_ar: name, sort_order: categories.length + 1, is_visible: true, is_published: true }
     if (supabase) {
       const query = editingCategory
-        ? supabase.from('categories').update({ name, name_ar: categoryDraftAr.trim(), name_en: categoryDraftEn.trim() }).eq('id', editingCategory)
+        ? supabase.from('categories').update({ name, name_ar: name }).eq('id', editingCategory)
         : supabase.from('categories').insert(payload)
       const { error } = await query
       if (error) return notify(`تعذر حفظ القسم: ${error.message}`, 'error')
@@ -285,7 +541,7 @@ export default function App() {
       setCategories(data || [])
     } else if (editingCategory) setCategories(prev => prev.map(c => c.id === editingCategory ? { ...c, ...payload } : c))
     else setCategories(prev => [...prev, { ...payload, id: crypto.randomUUID() }])
-    setCategoryDraft(''); setCategoryDraftAr(''); setCategoryDraftEn(''); setEditingCategory(null); notify('تم حفظ القسم')
+    setCategoryDraftAr(''); setEditingCategory(null); notify('تم حفظ القسم')
   }
   const deleteCategory = async (id) => {
     setConfirmDialog({
@@ -303,8 +559,8 @@ export default function App() {
     })
   }
   const saveProduct = async () => {
-    if (!(productDraft.name_ar.trim() || productDraft.name_en.trim()) || !productDraft.category_id || productDraft.price === '') return notify('أكمل اسم المنتج والقسم والسعر')
-    const payload = { ...productDraft, name: productDraft.name_ar || productDraft.name_en, description: productDraft.description_ar || productDraft.description_en, price: Number(productDraft.price), is_published: true }
+    if (!productDraft.name_ar.trim() || !productDraft.category_id || productDraft.price === '') return notify('أكمل اسم المنتج والقسم والسعر')
+    const payload = { name: productDraft.name_ar.trim(), name_ar: productDraft.name_ar.trim(), description: productDraft.description_ar || '', description_ar: productDraft.description_ar || '', price: Number(productDraft.price), category_id: productDraft.category_id, image_url: productDraft.image_url, is_available: productDraft.is_available, is_featured: productDraft.is_featured, is_published: true }
     if (supabase) {
       const query = editingProduct
         ? supabase.from('products').update(payload).eq('id', editingProduct)
@@ -341,6 +597,7 @@ export default function App() {
     window.open(url, '_blank', 'noopener,noreferrer')
   }
   const submitInternalOrder = async () => {
+    if (new URLSearchParams(window.location.search).has('table') && !activeRestaurantTable && !activeQrIsGeneral) return notify('تعذر التعرف على الطاولة من رمز QR؛ أعد فتح رمز الطاولة الصحيح')
     if (!settings.internal_orders_enabled) return notify('الطلبات الداخلية غير مفعلة')
     if (!cart.length) return notify('السلة فارغة')
     if (!supabase) return notify('يلزم ربط Supabase لتسجيل الطلب داخلياً')
@@ -349,7 +606,7 @@ export default function App() {
     const { error } = await supabase.from('orders').insert({
       visitor_id: visitorId,
       items: cart.map(({id,name,price,quantity}) => ({ product_id:id, name, price, quantity })),
-      total, notes: orderNote, status: 'new'
+      total, notes: orderNote, status: 'new', restaurant_table_id: activeRestaurantTable?.id || null, table_name: activeRestaurantTable?.table_name || null
     })
     if (error) return notify(`تعذر تسجيل الطلب: ${error.message}`)
     setCart([]); setOrderNote(''); notify('تم إرسال الطلب بنجاح')
@@ -364,22 +621,22 @@ export default function App() {
   }
   const logout = async () => { await supabase?.auth.signOut(); window.history.replaceState({}, '', import.meta.env.BASE_URL || '/'); setPage('menu') }
   const makeQr = async () => {
-    const baseUrl = import.meta.env.VITE_PUBLIC_MENU_URL || new URL(import.meta.env.BASE_URL || '/', window.location.origin).toString()
-    const qrUrl = new URL(baseUrl, window.location.origin)
-    qrUrl.searchParams.set('source', 'qr')
-    const url = qrUrl.toString()
-    setQrData(url)
-    try {
-      const QRCode = (await import('qrcode')).default
-      setQrImage(await QRCode.toDataURL(url, { width: 480, margin: 2 }))
-    } catch { notify('تعذر إنشاء QR') }
+    if (!supabase) return notify('اربط Supabase أولاً لحفظ رمز QR بشكل دائم')
+    await loadRestaurantTables()
+    notify('تم تحميل رموز QR المحفوظة')
   }
+
+
+  useEffect(() => {
+    document.documentElement.lang = 'ar'
+    document.documentElement.dir = 'rtl'
+  }, [])
 
   return <div className="app-shell" style={{'--brand': settings.primary_color || '#1d4738'}}>
     <header className="topbar">
       <button className="icon-btn mobile-menu" onClick={() => allowedOwner ? window.scrollTo({top: 0, behavior: 'smooth'}) : setPage('menu')} aria-label={allowedOwner ? 'لوحة الإدارة' : 'القائمة'}><Menu/></button>
-      <div className="brand"><div className="brand-mark">{settings.logo_url?<img src={settings.logo_url} alt="logo"/>:<Utensils size={20}/>}</div><div><strong>{lang === 'ar' ? settings.restaurant_name : (settings.restaurant_name_en || settings.restaurant_name)}</strong><small>{text('القائمة الإلكترونية','Digital menu')}</small></div></div>
-      <button className="outline-btn lang-toggle" onClick={() => setLang(lang === 'ar' ? 'en' : 'ar')}>{lang === 'ar' ? 'English' : 'العربية'}</button><nav className="top-nav">
+      <div className="brand"><div className="brand-mark">{settings.logo_url?<img src={settings.logo_url} alt="logo"/>:<Store size={21}/>}</div><div><strong>{arabicValue(settings.restaurant_name) || 'مطعم MenuGo'}</strong><small>القائمة الإلكترونية</small></div></div>
+<nav className="top-nav">
         {allowedOwner ? <>
           <button className={page==='menu'?'active':''} onClick={()=>setPage('menu')}>المينيو</button>
           <button className={page==='admin'?'active':''} onClick={()=>setPage('admin')}>لوحة الإدارة</button>
@@ -393,30 +650,29 @@ export default function App() {
           <button className={page==='cart'?'active':''} onClick={()=>setPage('cart')}>السلة <span className="count">{count}</span></button>
         </>}
       </nav>
-      {!allowedOwner && <button className="cart-top" onClick={()=>setPage('cart')}><ShoppingBag size={18}/><span>{count}</span></button>}
+      {!allowedOwner && <button className="cart-top" onClick={()=>setPage('cart')}><ShoppingCart size={18}/><span>{count}</span></button>}
     </header>
 
     {page==='menu' && <>
       <section className="hero">
-        <div className="hero-copy"><span className="eyebrow">MENU • FRESH • DELICIOUS</span><h1>{settings.tagline || 'نكهات تستحق التجربة'}</h1><p>تصفح قائمتنا واختر ما يناسب ذوقك.</p><button className="primary-btn" onClick={()=>document.getElementById('menu-list')?.scrollIntoView({behavior:'smooth'})}>استكشف القائمة <ChevronDown size={17}/></button></div>
-        <div className="hero-art"><div className="plate"><Coffee size={86}/></div><span className="art-leaf leaf-one">✦</span><span className="art-leaf leaf-two">✧</span></div>
+        <div className="hero-copy"><span className="eyebrow">قائمة طعام • طازجة • شهية</span>{activeRestaurantTable&&<span className="table-order-badge">الطلب للطاولة: {activeRestaurantTable.table_name}</span>}<h1>{arabicValue(settings.tagline) || 'نكهات تستحق التجربة'}</h1><p>تصفح قائمتنا واختر ما يناسب ذوقك.</p><button className="primary-btn" onClick={()=>document.getElementById('menu-list')?.scrollIntoView({behavior:'smooth'})}>استكشف القائمة <ChevronDown size={17}/></button></div>
+        <div className="hero-art"><div className="plate"><Coffee size={86}/></div><span className="art-leaf leaf-one"><Sparkles size={30}/></span><span className="art-leaf leaf-two"><Sparkles size={21}/></span></div>
       </section>
       <main id="menu-list" className="content">
-        <div className="section-heading"><div><span className="eyebrow">OUR MENU</span><h2>قائمتنا</h2><p>اختر من أشهى الأصناف المحضرة بعناية</p></div><label className="search-box"><Search size={18}/><input value={search} onChange={e=>setSearch(e.target.value)} placeholder="ابحث عن طبق أو مشروب..."/></label></div>
+        <div className="section-heading"><div><span className="eyebrow">قائمتنا</span><h2>قائمتنا</h2><p>اختر من أشهى الأصناف المحضرة بعناية</p></div><label className="search-box"><Search size={18}/><input value={search} onChange={e=>setSearch(e.target.value)} placeholder="ابحث عن طبق أو مشروب..."/></label></div>
         <div className="category-tabs"><button className={activeCategory==='all'?'selected':''} onClick={()=>setActiveCategory('all')}>الكل</button>{visibleCategories.map(c=><button key={c.id} className={activeCategory===c.id?'selected':''} onClick={()=>setActiveCategory(c.id)}>{localized(c,'name')}</button>)}</div>
-        <div className="product-grid">{shownProducts.map(p=><article className="product-card" key={p.id} onClick={()=>trackProductView(p.id)}><div className="product-image">{p.image_url?<img src={p.image_url} alt={p.name}/>:<div className="food-placeholder"><Utensils size={34}/></div>}{p.is_featured&&<span className="featured">اختيار مميز</span>}</div><div className="product-info"><div><h3>{localized(p,'name')}</h3><p>{localized(p,'description')}</p></div><div className="product-bottom"><strong>{money(p.price,settings.currency)}</strong><button className="add-btn" onClick={()=>addToCart(p)} aria-label="أضف إلى السلة"><Plus size={18}/></button></div><button className="tiny-btn review-trigger" onClick={e=>{e.stopPropagation();setReviewDraft({product:p,rating:5,comment:''})}}>{text('قيّم هذا المنتج','Rate this item')}</button></div></article>)}</div>
+        <div className="product-grid">{shownProducts.map(p=><article className="product-card" key={p.id} onClick={()=>trackProductView(p.id)}><div className="product-image">{p.image_url?<img src={p.image_url} alt={p.name}/>:<div className="food-placeholder"><UtensilsCrossed size={34}/></div>}{p.is_featured&&<span className="featured">اختيار مميز</span>}</div><div className="product-info"><div><h3>{localized(p,'name')}</h3><p>{localized(p,'description')}</p></div><div className="product-bottom"><strong>{money(p.price,settings.currency)}</strong><button className="add-btn" onClick={()=>addToCart(p)} aria-label="أضف إلى السلة"><Plus size={18}/></button></div><button className="tiny-btn review-trigger" onClick={e=>{e.stopPropagation();setReviewDraft({product:p,rating:5,comment:''})}}>قيّم هذا المنتج</button></div></article>)}</div>
         {!shownProducts.length&&<div className="empty-state">لا توجد منتجات مطابقة حالياً.</div>}
       </main>
-      <footer className="footer"><div><strong>{settings.restaurant_name}</strong><p>نسعد بخدمتكم دائماً</p></div><div className="socials">
-        {settings.facebook_enabled&&settings.facebook_url&&<a href={settings.facebook_url} target="_blank" rel="noreferrer" aria-label="Facebook"><Facebook/></a>}
-        {settings.instagram_enabled&&settings.instagram_url&&<a href={settings.instagram_url} target="_blank" rel="noreferrer" aria-label="Instagram"><Instagram/></a>}
-        {restaurantMapUrl(settings)&&<a href={restaurantMapUrl(settings)} target="_blank" rel="noreferrer" aria-label="موقع المطعم" title="موقع المطعم"><MapPin/></a>}
-      </div><div className="footer-location">{settings.restaurant_address&&<small>{settings.restaurant_address}</small>}{restaurantMapUrl(settings)&&<a className="footer-map-link" href={restaurantMapUrl(settings)} target="_blank" rel="noreferrer"><MapPin size={16}/> موقع المطعم</a>}</div><small>Powered by MenuGo</small></footer>
+      <footer className="footer"><div><strong>{arabicValue(settings.restaurant_name) || 'مطعم MenuGo'}</strong><p>نسعد بخدمتكم دائماً</p></div><div className="socials">
+        {settings.facebook_enabled&&settings.facebook_url&&<a href={settings.facebook_url} target="_blank" rel="noreferrer" aria-label="فيسبوك"><Facebook/></a>}
+        {settings.instagram_enabled&&settings.instagram_url&&<a href={settings.instagram_url} target="_blank" rel="noreferrer" aria-label="إنستغرام"><Instagram/></a>}
+      </div><div className="footer-location">{restaurantMapUrl(settings)&&<div className="footer-location-actions"><a className="footer-map-link" href={restaurantMapUrl(settings)} target="_blank" rel="noreferrer"><MapPinned size={17}/> موقع المطعم</a><button className="footer-distance-btn" type="button" onClick={calculateRestaurantDistance} disabled={distanceLoading}>{distanceLoading?'جارٍ الحساب...':'احسب المسافة'}</button></div>}{distanceInfo&&<small className={`footer-distance-result ${distanceInfo.kind}`} aria-live="polite">{distanceInfo.text}</small>}{distanceInfo?.kind==='success'&&<small className="footer-distance-credit">المسافة محسوبة على الطرق باستخدام بيانات OpenStreetMap عبر Valhalla.</small>}</div><small>بواسطة MenuGo</small></footer>
     </>}
 
-    {page==='cart'&&<main className="content narrow"><div className="section-heading"><div><span className="eyebrow">YOUR ORDER</span><h2>سلة الطلبات</h2><p>راجع طلبك قبل الإرسال</p></div><button className="outline-btn" onClick={()=>setPage('menu')}>العودة للقائمة</button></div>
-      {!cart.length?<div className="empty-state"><ShoppingBag size={38}/><h3>سلتك فارغة</h3><p>أضف بعض الأصناف اللذيذة من القائمة.</p><button className="primary-btn" onClick={()=>setPage('menu')}>تصفح المينيو</button></div>:<div className="cart-layout"><section className="cart-items">{cart.map(item=><div className="cart-row" key={item.id}><div className="cart-thumb">{item.image_url?<img src={item.image_url} alt={item.name}/>:<Utensils size={22}/>}</div><div className="cart-desc"><strong>{item.name}</strong><small>{money(item.price,settings.currency)} للقطعة</small></div><div className="qty"><button onClick={()=>changeQty(item.id,-1)}><Minus size={14}/></button><b>{item.quantity}</b><button onClick={()=>changeQty(item.id,1)}><Plus size={14}/></button></div><strong>{money(item.price*item.quantity,settings.currency)}</strong><button className="remove-btn" onClick={()=>changeQty(item.id,-item.quantity)}><Trash2 size={17}/></button></div>)}
-      <label className="field-label">ملاحظات على الطلب<textarea value={orderNote} onChange={e=>setOrderNote(e.target.value)} placeholder="مثلاً: بدون بصل، أو صوص إضافي..."/></label></section><aside className="summary"><h3>ملخص الطلب</h3><div><span>عدد الأصناف</span><b>{count}</b></div><div className="grand-total"><span>الإجمالي</span><strong>{money(total,settings.currency)}</strong></div>
+    {page==='cart'&&<main className="content narrow"><div className="section-heading"><div><span className="eyebrow">طلبك</span><h2>سلة الطلبات</h2><p>راجع طلبك قبل الإرسال</p></div><button className="outline-btn" onClick={()=>setPage('menu')}>العودة للقائمة</button></div>
+      {!cart.length?<div className="empty-state"><ShoppingCart size={38}/><h3>سلتك فارغة</h3><p>أضف بعض الأصناف اللذيذة من القائمة.</p><button className="primary-btn" onClick={()=>setPage('menu')}>تصفح المينيو</button></div>:<div className="cart-layout"><section className="cart-items">{cart.map(item=><div className="cart-row" key={item.id}><div className="cart-thumb">{item.image_url?<img src={item.image_url} alt={item.name}/>:<UtensilsCrossed size={22}/>}</div><div className="cart-desc"><strong>{item.name}</strong><small>{money(item.price,settings.currency)} للقطعة</small></div><div className="qty"><button onClick={()=>changeQty(item.id,-1)}><Minus size={14}/></button><b>{item.quantity}</b><button onClick={()=>changeQty(item.id,1)}><Plus size={14}/></button></div><strong>{money(item.price*item.quantity,settings.currency)}</strong><button className="remove-btn" onClick={()=>changeQty(item.id,-item.quantity)}><Trash2 size={17}/></button></div>)}
+      <label className="field-label">ملاحظات على الطلب<textarea value={orderNote} onChange={e=>setOrderNote(e.target.value)} placeholder="مثلاً: بدون بصل، أو صوص إضافي..."/></label></section><aside className="summary"><h3>ملخص الطلب</h3>{activeRestaurantTable&&<div><span>الطاولة</span><b>{activeRestaurantTable.table_name}</b></div>}<div><span>عدد الأصناف</span><b>{count}</b></div><div className="grand-total"><span>الإجمالي</span><strong>{money(total,settings.currency)}</strong></div>
       {settings.whatsapp_enabled&&<button className="whatsapp-btn" onClick={sendWhatsApp}>إرسال الطلب عبر واتساب</button>}
       {settings.internal_orders_enabled&&<button className="primary-btn full" onClick={submitInternalOrder}>تأكيد الطلب</button>}
       {!settings.whatsapp_enabled&&!settings.internal_orders_enabled&&<p className="muted">طرق الطلب غير مفعلة حالياً. يرجى التواصل مع المطعم.</p>}</aside></div>}
@@ -424,7 +680,7 @@ export default function App() {
 
     {page==='admin'&&isAdminEntry&&<main className="content admin-content">{!allowedOwner?<div className="empty-state"><LogIn size={38}/><h2>دخول صاحب المطعم</h2><p>تسجيل الدخول متاح لحساب Google المحدد لهذه النسخة فقط.</p><button className="primary-btn" onClick={login}><LogIn size={17}/> الدخول باستخدام Google</button></div>:<>
       <div className="section-heading"><div><span className="eyebrow">CONTROL PANEL</span><h2>لوحة إدارة المطعم</h2><p>إدارة قائمتك وإعدادات المطعم من مكان واحد</p></div><button className="outline-btn" onClick={logout}><LogOut size={16}/> تسجيل الخروج</button></div>
-      <div className="admin-tabs"><button className="selected" onClick={()=>document.getElementById('settings-panel')?.scrollIntoView({behavior:'smooth'})}><Settings size={16}/> الإعدادات</button><button onClick={()=>document.getElementById('categories-panel')?.scrollIntoView({behavior:'smooth'})}>الأقسام</button><button onClick={()=>document.getElementById('products-panel')?.scrollIntoView({behavior:'smooth'})}>المنتجات</button><button onClick={()=>document.getElementById('orders-panel')?.scrollIntoView({behavior:'smooth'})}>الطلبات</button><button onClick={()=>document.getElementById('reviews-panel')?.scrollIntoView({behavior:'smooth'})}>التقييمات</button><button onClick={()=>document.getElementById('qr-panel')?.scrollIntoView({behavior:'smooth'})}><QrCode size={16}/> QR</button><button onClick={()=>document.getElementById('analytics-panel')?.scrollIntoView({behavior:'smooth'})}><Eye size={16}/> الإحصائيات</button></div>
+      <div className="admin-tabs"><button className="selected" onClick={()=>document.getElementById('settings-panel')?.scrollIntoView({behavior:'smooth'})}><SlidersHorizontal size={17}/> الإعدادات</button><button onClick={()=>document.getElementById('categories-panel')?.scrollIntoView({behavior:'smooth'})}>الأقسام</button><button onClick={()=>document.getElementById('products-panel')?.scrollIntoView({behavior:'smooth'})}>المنتجات</button><button onClick={()=>document.getElementById('orders-panel')?.scrollIntoView({behavior:'smooth'})}>الطلبات</button><button onClick={()=>document.getElementById('reviews-panel')?.scrollIntoView({behavior:'smooth'})}>التقييمات</button><button onClick={()=>document.getElementById('qr-panel')?.scrollIntoView({behavior:'smooth'})}><QrCode size={16}/> QR</button><button onClick={()=>document.getElementById('analytics-panel')?.scrollIntoView({behavior:'smooth'})}><Eye size={16}/> الإحصائيات</button></div>
       <section id="analytics-panel" className="admin-panel analytics-panel"><div className="panel-title"><Eye/><div><h3>إحصائيات الزوار</h3><p>آخر 30 يوماً — تُحدّث عند فتح لوحة الإدارة</p></div><button className="outline-btn" onClick={loadAnalytics}>تحديث</button></div>
         {analyticsLoading?<p className="muted">جارٍ تحميل الإحصائيات...</p>:analytics?<>
           <div className="analytics-cards">
@@ -440,38 +696,43 @@ export default function App() {
           <p className="muted analytics-note">يُحتسب الزائر الفريد بواسطة معرّف عشوائي محفوظ على جهازه، ولا نسجل الاسم أو البريد أو عنوان IP. قد يتغير العدد إذا حذف الزائر بيانات المتصفح أو استخدم جهازاً آخر.</p>
         </>:<p className="muted">لا توجد بيانات بعد. ستظهر الإحصائيات بعد بدء استقبال الزيارات.</p>}
       </section>
-      <section id="settings-panel" className="admin-panel"><div className="panel-title"><Settings/><div><h3>إعدادات المطعم والتواصل</h3><p>هذه الإعدادات تخص نسخة هذا المطعم فقط.</p></div></div>
-        <div className="form-grid"><label>اسم المطعم<input value={settings.restaurant_name} onChange={e=>updateSetting('restaurant_name',e.target.value)}/></label><label>اسم المطعم بالإنجليزية<input value={settings.restaurant_name_en||''} onChange={e=>updateSetting('restaurant_name_en',e.target.value)}/></label><label>عبارة ترحيبية<input value={settings.tagline||''} onChange={e=>updateSetting('tagline',e.target.value)}/></label><label>Welcome tagline (English)<input value={settings.tagline_en||''} onChange={e=>updateSetting('tagline_en',e.target.value)}/></label><label>العملة<select value={settings.currency||'EUR'} onChange={e=>updateSetting('currency',e.target.value)}><option value="EUR">يورو EUR</option><option value="USD">دولار USD</option><option value="TRY">ليرة تركية TRY</option><option value="SAR">ريال سعودي SAR</option><option value="SYP">ليرة سورية SYP</option></select></label><label>لون الهوية<input type="color" value={settings.primary_color||'#1d4738'} onChange={e=>updateSetting('primary_color',e.target.value)}/></label></div>
+      <section id="settings-panel" className="admin-panel"><div className="panel-title"><SlidersHorizontal/><div><h3>إعدادات المطعم والتواصل</h3><p>هذه الإعدادات تخص نسخة هذا المطعم فقط.</p></div></div>
+        <div className="form-grid"><label>اسم المطعم<input value={settings.restaurant_name} onChange={e=>updateSetting('restaurant_name',e.target.value)}/></label><label>عبارة ترحيبية<input value={settings.tagline||''} onChange={e=>updateSetting('tagline',e.target.value)}/></label><label>العملة<select value={settings.currency||'EUR'} onChange={e=>updateSetting('currency',e.target.value)}><option value="EUR">يورو EUR</option><option value="USD">دولار USD</option><option value="TRY">ليرة تركية TRY</option><option value="SAR">ريال سعودي SAR</option><option value="SYP">ليرة سورية SYP</option></select></label><label>لون الهوية<input type="color" value={settings.primary_color||'#1d4738'} onChange={e=>updateSetting('primary_color',e.target.value)}/></label></div>
         <div className="form-grid"><label>شعار المطعم<input type="file" accept="image/png,image/jpeg,image/webp" onChange={e=>uploadImage(e.target.files?.[0],url=>updateSetting('logo_url',url))}/>{settings.logo_url&&<img className="admin-image-preview" src={settings.logo_url} alt="شعار المطعم"/>}</label><label>صورة الغلاف<input type="file" accept="image/png,image/jpeg,image/webp" onChange={e=>uploadImage(e.target.files?.[0],url=>updateSetting('cover_url',url))}/>{settings.cover_url&&<img className="admin-image-preview" src={settings.cover_url} alt="غلاف المطعم"/>}</label></div>
         <div className="setting-row"><div><b>الطلب عبر واتساب</b><small>إظهار أو إخفاء زر الطلب عبر واتساب للزبائن</small></div><input type="checkbox" checked={!!settings.whatsapp_enabled} onChange={e=>updateSetting('whatsapp_enabled',e.target.checked)}/></div>
         {settings.whatsapp_enabled&&<label className="single-field">رقم واتساب مع رمز الدولة<input value={settings.whatsapp_number||''} onChange={e=>updateSetting('whatsapp_number',e.target.value)} placeholder="مثال: 33612345678"/></label>}
         <div className="setting-row"><div><b>استقبال الطلبات داخل النظام</b><small>حفظ الطلبات في قاعدة البيانات لمتابعة حالتها</small></div><input type="checkbox" checked={!!settings.internal_orders_enabled} onChange={e=>updateSetting('internal_orders_enabled',e.target.checked)}/></div>
+        <div className="setting-row"><div><b>التنبيه الصوتي للطلبات الجديدة</b><small>تشغيل صوت عند وصول طلب جديد إلى لوحة الإدارة</small></div><input type="checkbox" checked={!!settings.order_sound_enabled} onChange={e=>{updateSetting('order_sound_enabled',e.target.checked);if(e.target.checked)playNewOrderSound()}}/></div>
+        <div className="setting-row"><div><b>إدارة حالات الطلبات</b><small>إظهار أو إخفاء خيارات تغيير حالة الطلب</small></div><input type="checkbox" checked={settings.order_status_enabled!==false} onChange={e=>updateSetting('order_status_enabled',e.target.checked)}/></div>
         <div className="social-setting"><div className="social-heading"><Facebook/><b>فيسبوك</b><input type="checkbox" checked={!!settings.facebook_enabled} onChange={e=>updateSetting('facebook_enabled',e.target.checked)}/></div>{settings.facebook_enabled&&<input value={settings.facebook_url||''} onChange={e=>updateSetting('facebook_url',e.target.value)} placeholder="رابط صفحة فيسبوك"/>}</div>
         <div className="social-setting"><div className="social-heading"><Instagram/><b>إنستغرام</b><input type="checkbox" checked={!!settings.instagram_enabled} onChange={e=>updateSetting('instagram_enabled',e.target.checked)}/></div>{settings.instagram_enabled&&<input value={settings.instagram_url||''} onChange={e=>updateSetting('instagram_url',e.target.value)} placeholder="رابط حساب إنستغرام"/>}</div>
-        <div className="social-setting location-setting"><div className="social-heading"><MapPin/><b>موقع المطعم على الخريطة</b></div><label className="single-field">عنوان المطعم<input value={settings.restaurant_address||''} onChange={e=>updateSetting('restaurant_address',e.target.value)} placeholder="المدينة، الشارع، رقم المبنى"/></label><label className="single-field">رابط Google Maps<input type="url" value={settings.restaurant_location_url||''} onChange={e=>updateSetting('restaurant_location_url',e.target.value)} placeholder="https://maps.app.goo.gl/..."/></label><small className="muted">انسخ رابط المشاركة من خرائط Google والصقه هنا. سيظهر زر الموقع للزوار عند إدخال الرابط.</small></div>
+        <div className="social-setting location-setting"><div className="social-heading"><MapPinned/><b>موقع المطعم على الخريطة</b></div><label className="single-field">وصف الموقع (للمدير فقط)<input value={settings.restaurant_address||''} onChange={e=>updateSetting('restaurant_address',e.target.value)} placeholder="وصف يساعدك على تذكر الموقع"/></label><label className="single-field">رابط موقع المطعم على خرائط Google<input type="url" value={settings.restaurant_location_url||''} onChange={e=>updateSetting('restaurant_location_url',e.target.value)} placeholder="https://maps.app.goo.gl/..."/></label><div className="location-coordinates"><label className="single-field">خط العرض<input type="number" step="any" value={settings.restaurant_latitude??''} onChange={e=>{updateSetting('restaurant_latitude',e.target.value);setDistanceInfo(null)}} placeholder="مثال: 33.5138"/></label><label className="single-field">خط الطول<input type="number" step="any" value={settings.restaurant_longitude??''} onChange={e=>{updateSetting('restaurant_longitude',e.target.value);setDistanceInfo(null)}} placeholder="مثال: 36.2765"/></label></div><small className="muted">للدقة: افتح موقع المطعم في خرائط Google، واضغط مطولاً على النقطة الصحيحة، ثم انسخ الإحداثيين الظاهرين وأدخلهما هنا. إذا كان رابط الخريطة يحتوي على إحداثيات فسيتم التقاطها تلقائياً؛ أما الرابط المختصر فقد يحتاج إدخال الإحداثيين يدوياً. الوصف لا يظهر للزوار. الإحداثيات تحدد دبوس المطعم وتحسب مسافة الطريق بالسيارة.</small></div>
         <button className="primary-btn" onClick={saveSettings}><Save size={17}/> حفظ الإعدادات</button>
       </section>
-      <section id="categories-panel" className="admin-panel"><div className="panel-title"><Package/><div><h3>إدارة الأقسام</h3><p>أضف أقساماً غير محددة العدد ورتبها حسب قائمتك.</p></div></div><div className="inline-form"><input value={categoryDraftAr} onChange={e=>setCategoryDraftAr(e.target.value)} placeholder="اسم القسم بالعربية"/><input value={categoryDraftEn} onChange={e=>setCategoryDraftEn(e.target.value)} placeholder="Category name in English"/><button className="primary-btn" onClick={saveCategory}>{editingCategory?'تحديث القسم':'إضافة قسم'}</button>{editingCategory&&<button className="outline-btn" onClick={()=>{setEditingCategory(null);setCategoryDraft('');setCategoryDraftAr('');setCategoryDraftEn('')}}>إلغاء</button>}</div>
-        {categories.map(c=><div className="manage-row" key={c.id}><span>{categoryLabel(c)}</span><button className="tiny-btn" onClick={()=>{setEditingCategory(c.id);setCategoryDraftAr(c.name_ar || c.name);setCategoryDraftEn(c.name_en || c.name)}}>تعديل</button><button className="tiny-btn" onClick={()=>moveCategory(c.id,-1)} title="تحريك لأعلى">↑</button><button className="tiny-btn" onClick={()=>moveCategory(c.id,1)} title="تحريك لأسفل">↓</button><button className="tiny-btn danger" onClick={()=>deleteCategory(c.id)}>حذف</button><button className="tiny-btn" onClick={async()=>{const v=!c.is_visible;if(supabase){const {error}=await supabase.from('categories').update({is_visible:v}).eq('id',c.id);if(error)return notify(error.message)}setCategories(prev=>prev.map(x=>x.id===c.id?{...x,is_visible:v}:x))}}>{c.is_visible===false?<EyeOff size={15}/>:<Eye size={15}/>}</button></div>)}
+      <section id="categories-panel" className="admin-panel"><div className="panel-title"><Tags/><div><h3>إدارة الأقسام</h3><p>أضف أقساماً غير محددة العدد ورتبها حسب قائمتك.</p></div></div><div className="inline-form"><input value={categoryDraftAr} onChange={e=>setCategoryDraftAr(e.target.value)} placeholder="اسم القسم بالعربية"/><button className="primary-btn" onClick={saveCategory}>{editingCategory?'تحديث القسم':'إضافة قسم'}</button>{editingCategory&&<button className="outline-btn" onClick={()=>{setEditingCategory(null);setCategoryDraftAr('')}}>إلغاء</button>}</div>
+        {categories.map(c=><div className="manage-row" key={c.id}><span>{categoryLabel(c)}</span><button className="tiny-btn" onClick={()=>{setEditingCategory(c.id);setCategoryDraftAr(categoryLabel(c));}}>تعديل</button><button className="tiny-btn icon-action" onClick={()=>moveCategory(c.id,-1)} title="تحريك لأعلى" aria-label="تحريك لأعلى"><ArrowUp size={16}/></button><button className="tiny-btn icon-action" onClick={()=>moveCategory(c.id,1)} title="تحريك لأسفل" aria-label="تحريك لأسفل"><ArrowDown size={16}/></button><button className="tiny-btn danger" onClick={()=>deleteCategory(c.id)}>حذف</button><button className="tiny-btn" onClick={async()=>{const v=!c.is_visible;if(supabase){const {error}=await supabase.from('categories').update({is_visible:v}).eq('id',c.id);if(error)return notify(error.message)}setCategories(prev=>prev.map(x=>x.id===c.id?{...x,is_visible:v}:x))}}>{c.is_visible===false?<EyeOff size={15}/>:<Eye size={15}/>}</button></div>)}
       </section>
-      <section id="products-panel" className="admin-panel"><div className="panel-title"><Utensils/><div><h3>إدارة المنتجات</h3><p>إضافة المنتجات وتعديل الأسعار والتوفر والصور.</p></div></div>
-        <div className="form-grid"><label>اسم المنتج بالعربية<input value={productDraft.name_ar} onChange={e=>setProductDraft({...productDraft,name_ar:e.target.value})}/></label><label>Product name (English)<input value={productDraft.name_en} onChange={e=>setProductDraft({...productDraft,name_en:e.target.value})}/></label><label>السعر<input type="number" min="0" step="0.01" value={productDraft.price} onChange={e=>setProductDraft({...productDraft,price:e.target.value})}/></label><label>القسم<select value={productDraft.category_id} onChange={e=>setProductDraft({...productDraft,category_id:e.target.value})}><option value="">اختر القسم</option>{categories.map(c=><option key={c.id} value={c.id}>{categoryLabel(c)}</option>)}</select></label><label>صورة المنتج<input type="file" accept="image/png,image/jpeg,image/webp" onChange={e=>uploadImage(e.target.files?.[0],url=>setProductDraft(prev=>({...prev,image_url:url})))}/>{productDraft.image_url&&<img className="admin-image-preview" src={productDraft.image_url} alt="معاينة"/>}{uploading&&<small>جارٍ رفع الصورة...</small>}</label><label>الوصف بالعربية<textarea value={productDraft.description_ar} onChange={e=>setProductDraft({...productDraft,description_ar:e.target.value})}/></label><label>Description (English)<textarea value={productDraft.description_en} onChange={e=>setProductDraft({...productDraft,description_en:e.target.value})}/></label></div>
+      <section id="products-panel" className="admin-panel"><div className="panel-title"><UtensilsCrossed/><div><h3>إدارة المنتجات</h3><p>إضافة المنتجات وتعديل الأسعار والتوفر والصور.</p></div></div>
+        <div className="form-grid"><label>اسم المنتج بالعربية<input value={productDraft.name_ar} onChange={e=>setProductDraft({...productDraft,name_ar:e.target.value})}/></label><label>السعر<input type="number" min="0" step="0.01" value={productDraft.price} onChange={e=>setProductDraft({...productDraft,price:e.target.value})}/></label><label>القسم<select value={productDraft.category_id} onChange={e=>setProductDraft({...productDraft,category_id:e.target.value})}><option value="">اختر القسم</option>{categories.map(c=><option key={c.id} value={c.id}>{categoryLabel(c)}</option>)}</select></label><label>صورة المنتج<input type="file" accept="image/png,image/jpeg,image/webp" onChange={e=>uploadImage(e.target.files?.[0],url=>setProductDraft(prev=>({...prev,image_url:url})))}/>{productDraft.image_url&&<img className="admin-image-preview" src={productDraft.image_url} alt="معاينة"/>}{uploading&&<small>جارٍ رفع الصورة...</small>}</label><label>الوصف بالعربية<textarea value={productDraft.description_ar} onChange={e=>setProductDraft({...productDraft,description_ar:e.target.value})}/></label></div>
         <div className="check-line"><label><input type="checkbox" checked={!!productDraft.is_available} onChange={e=>setProductDraft({...productDraft,is_available:e.target.checked})}/> متوفر</label><label><input type="checkbox" checked={!!productDraft.is_featured} onChange={e=>setProductDraft({...productDraft,is_featured:e.target.checked})}/> منتج مميز</label></div>
         <button className="primary-btn" onClick={saveProduct}>{editingProduct?'تحديث المنتج':'إضافة المنتج'}</button>
-        {products.map(p=><div className="manage-row" key={p.id}><span><b>{p.name_ar || p.name} / {p.name_en || p.name}</b><small>{money(p.price,settings.currency)}</small></span><button className="tiny-btn" onClick={()=>{setEditingProduct(p.id);setProductDraft({...emptyProduct,...p,name_ar:p.name_ar||p.name,name_en:p.name_en||p.name,description_ar:p.description_ar||p.description,description_en:p.description_en||p.description,price:String(p.price)})}}>تعديل</button><button className="tiny-btn" onClick={async()=>{const v=p.is_published===false;const {error}=await supabase.from('products').update({is_published:v}).eq('id',p.id);if(error)return notify(error.message);setProducts(prev=>prev.map(x=>x.id===p.id?{...x,is_published:v}:x))}}>{p.is_published===false?<EyeOff size={15}/>:<Eye size={15}/>}</button><button className="tiny-btn danger" onClick={()=>deleteProduct(p.id)}>حذف</button></div>)}
+        {products.map(p=><div className="manage-row" key={p.id}><span><b>{localized(p, 'name')}</b><small>{money(p.price,settings.currency)}</small></span><button className="tiny-btn" onClick={()=>{setEditingProduct(p.id);setProductDraft({...emptyProduct,...p,name_ar:p.name_ar||p.name,description_ar:p.description_ar||p.description,price:String(p.price)})}}>تعديل</button><button className="tiny-btn" onClick={async()=>{const v=p.is_published===false;const {error}=await supabase.from('products').update({is_published:v}).eq('id',p.id);if(error)return notify(error.message);setProducts(prev=>prev.map(x=>x.id===p.id?{...x,is_published:v}:x))}}>{p.is_published===false?<EyeOff size={15}/>:<Eye size={15}/>}</button><button className="tiny-btn danger" onClick={()=>deleteProduct(p.id)}>حذف</button></div>)}
       </section>
-      <section id="orders-panel" className="admin-panel"><div className="panel-title"><Package/><div><h3>إدارة الطلبات</h3><p>متابعة الطلبات الداخلية وتحديث حالتها</p></div><button className="outline-btn" onClick={loadOrders}>تحديث</button></div>
-        {orders.length ? orders.map(order=><article className="order-card" key={order.id}><div className="manage-row"><b>طلب #{order.order_number || order.id.slice(0,8)}</b><small>{new Date(order.created_at).toLocaleString('ar')}</small></div><p>{(order.items||[]).map(i=>`${i.name} × ${i.quantity} (${money(i.price*i.quantity,settings.currency)})`).join('، ')}</p><p><b>الإجمالي:</b> {money(order.total,settings.currency)} {order.notes&&<> · {order.notes}</>}</p><label>حالة الطلب<select value={order.status} onChange={e=>changeOrderStatus(order.id,e.target.value)}>{[['new','جديد'],['preparing','قيد التحضير'],['ready','جاهز'],['completed','مكتمل'],['cancelled','ملغي']].map(([v,l])=><option value={v} key={v}>{l}</option>)}</select></label></article>) : <p className="muted">لا توجد طلبات داخلية حتى الآن.</p>}
+      <section id="orders-panel" className="admin-panel"><div className="panel-title"><ClipboardList/><div><h3>إدارة الطلبات</h3><p>متابعة الطلبات الداخلية وتحديث حالتها</p></div><button className="outline-btn" onClick={loadOrders}>تحديث</button></div>
+        {orders.length ? orders.map(order=><article className="order-card" key={order.id}><div className="manage-row"><b>طلب #{order.order_number || order.id.slice(0,8)}{order.table_name ? ` · ${order.table_name}` : ''}</b><small>{new Date(order.created_at).toLocaleString('ar')}</small></div><p>{(order.items||[]).map(i=>`${arabicValue(i.name) || 'منتج'} × ${i.quantity} (${money(i.price*i.quantity,settings.currency)})`).join('، ')}</p><p><b>الإجمالي:</b> {money(order.total,settings.currency)} {order.notes&&<> · {order.notes}</>}</p>{settings.order_status_enabled!==false&&<label>حالة الطلب<select value={order.status} onChange={e=>changeOrderStatus(order.id,e.target.value)}>{[['new','جديد'],['preparing','قيد التحضير'],['ready','جاهز'],['completed','مكتمل'],['cancelled','ملغي']].map(([v,l])=><option value={v} key={v}>{l}</option>)}</select></label>}</article>) : <p className="muted">لا توجد طلبات داخلية حتى الآن.</p>}
       </section>
-      <section id="reviews-panel" className="admin-panel"><div className="panel-title"><Eye/><div><h3>تقييمات المنتجات (خاصة بالمدير)</h3><p>لا تظهر التقييمات أو متوسطاتها للزوار</p></div><button className="outline-btn" onClick={loadReviews}>تحديث</button></div>
-        {reviews.map(r=><article className="order-card" key={r.product_id}><h4>{products.find(p=>p.id===r.product_id)?.name_ar || products.find(p=>p.id===r.product_id)?.name || 'منتج'}</h4><b>★ {r.average_rating} / 5 · {r.review_count} تقييم</b>{(r.reviews||[]).map(item=><p key={item.id}>{'★'.repeat(item.rating)} {item.comment || 'دون تعليق'} <small>{new Date(item.created_at).toLocaleString('ar')}</small></p>)}</article>)}
+      <section id="reviews-panel" className="admin-panel"><div className="panel-title"><Star/><div><h3>تقييمات المنتجات (خاصة بالمدير)</h3><p>لا تظهر التقييمات أو متوسطاتها للزوار</p></div><button className="outline-btn" onClick={loadReviews}>تحديث</button></div>
+        {reviews.map(r=><article className="order-card" key={r.product_id}><h4>{localized(products.find(p=>p.id===r.product_id), 'name') || 'منتج'}</h4><b>★ {r.average_rating} / 5 · {r.review_count} تقييم</b>{(r.reviews||[]).map(item=><p key={item.id}>{'★'.repeat(item.rating)} {item.comment || 'دون تعليق'} <small>{new Date(item.created_at).toLocaleString('ar')}</small></p>)}</article>)}
         {!reviews.length&&<p className="muted">لا توجد تقييمات بعد.</p>}
       </section>
-      <section id="qr-panel" className="admin-panel"><div className="panel-title"><QrCode/><div><h3>رمز QR الخاص بالمينيو</h3><p>أنشئ رمزاً يفتح رابط القائمة مباشرة.</p></div></div><button className="primary-btn" onClick={makeQr}>إنشاء رمز QR</button>{qrImage&&<div className="qr-result"><img src={qrImage} alt="QR Code"/><code>{qrData}</code><a className="outline-btn" href={qrImage} download="menugo-qr.png">تنزيل PNG</a><button className="outline-btn" onClick={()=>window.print()}>طباعة</button></div>}</section>
+      <section id="qr-panel" className="admin-panel"><div className="panel-title"><QrCode/><div><h3>إدارة رموز QR والطاولات</h3><p>الرموز محفوظة في قاعدة البيانات وتبقى ثابتة بعد إغلاق الموقع أو تسجيل الخروج.</p></div><button className="outline-btn" onClick={loadRestaurantTables}>تحديث</button></div>
+        <div className="table-create-row"><input value={tableDraft} onChange={e=>setTableDraft(e.target.value)} placeholder="اسم الطاولة، مثل: طاولة 1"/><button className="primary-btn" onClick={addRestaurantTable}>إضافة طاولة</button></div>
+        {tableLoading?<p className="muted">جارٍ تحميل الطاولات...</p>:<div className="restaurant-table-grid">{restaurantTables.map(table=><article className="restaurant-table-card" key={table.id}><h4>{table.is_general?'رمز القائمة العام':table.table_name}</h4><img src={tableQrImages[table.id]||''} alt={`رمز QR ${table.table_name}`}/><small>{table.is_general?'يفتح القائمة دون تحديد طاولة':'يفتح القائمة مع تحديد الطاولة تلقائياً'}</small><div className="table-qr-actions"><a className="outline-btn" href={tableQrImages[table.id]} download="menugo-qr.png">تنزيل</a><button className="outline-btn" onClick={()=>printTableQr(table)}>طباعة</button>{!table.is_general&&<button className="tiny-btn danger" onClick={()=>setConfirmDialog({title:'حذف الطاولة',message:`هل تريد حذف ${table.table_name}؟ سيتوقف رمزها عن العمل.`,onConfirm:()=>deleteRestaurantTable(table)})}>حذف</button>}</div></article>)}</div>}
+      </section>
       <section className="admin-panel"><h3>معلومات الربط</h3><p className="muted">{isSupabaseConfigured?'تم العثور على إعدادات Supabase في البيئة.':'لم يتم ضبط Supabase بعد؛ الواجهة تعمل ببيانات تجريبية محلية.'}</p></section>
     </>}</main>}
 
-    {reviewDraft.product&&<div className="review-backdrop"><section className="review-dialog"><button className="remove-btn" onClick={()=>setReviewDraft({product:null,rating:5,comment:''})}><X/></button><h3>{text('تقييم المنتج','Rate product')}: {localized(reviewDraft.product,'name')}</h3><label>{text('التقييم بالنجوم','Star rating')}<select value={reviewDraft.rating} onChange={e=>setReviewDraft({...reviewDraft,rating:e.target.value})}>{[5,4,3,2,1].map(n=><option key={n} value={n}>{'★'.repeat(n)} ({n})</option>)}</select></label><label>{text('تعليق اختياري','Optional comment')}<textarea maxLength={1000} value={reviewDraft.comment} onChange={e=>setReviewDraft({...reviewDraft,comment:e.target.value})}/></label><button className="primary-btn" onClick={submitReview}>{text('إرسال التقييم','Submit review')}</button></section></div>}
+    {reviewDraft.product&&<div className="review-backdrop"><section className="review-dialog"><button className="remove-btn" onClick={()=>setReviewDraft({product:null,rating:5,comment:''})}><X/></button><h3>تقييم المنتج: {localized(reviewDraft.product,'name')}</h3><label>التقييم بالنجوم<select value={reviewDraft.rating} onChange={e=>setReviewDraft({...reviewDraft,rating:e.target.value})}>{[5,4,3,2,1].map(n=><option key={n} value={n}>{'★'.repeat(n)} ({n})</option>)}</select></label><label>تعليق اختياري<textarea maxLength={1000} value={reviewDraft.comment} onChange={e=>setReviewDraft({...reviewDraft,comment:e.target.value})}/></label><button className="primary-btn" onClick={submitReview}>إرسال التقييم</button></section></div>}
     {notice&&<div className={`toast toast-${noticeKind}`} role="status" aria-live="polite">
       {noticeKind === 'error' ? <AlertCircle size={19}/> : <CheckCircle2 size={19}/>}
       <span>{notice}</span>
@@ -488,6 +749,6 @@ export default function App() {
         </div>
       </section>
     </div>}
-    {page==='menu'&&cart.length>0&&<button className="floating-cart" onClick={()=>setPage('cart')}><ShoppingBag/> عرض السلة <b>{count}</b><strong>{money(total,settings.currency)}</strong></button>}
+    {page==='menu'&&cart.length>0&&<button className="floating-cart" onClick={()=>setPage('cart')}><ShoppingCart/> عرض السلة <b>{count}</b><strong>{money(total,settings.currency)}</strong></button>}
   </div>
 }
