@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { supabase, ownerEmail } from './supabase.js'
 import { money, whatsappUrl } from './format.js'
-import { Menu, ShoppingCart, Search, Plus, Minus, Trash2, SlidersHorizontal, LogIn, LogOut, Tags, ClipboardList, QrCode, Eye, EyeOff, Save, X, Instagram, Facebook, MapPinned, Coffee, UtensilsCrossed, ChevronDown, CheckCircle2, AlertCircle, ShieldAlert, Store, Star, Sparkles, ArrowUp, ArrowDown } from 'lucide-react'
+import { Menu, ShoppingCart, Search, Plus, Minus, Trash2, SlidersHorizontal, LogIn, LogOut, Tags, ClipboardList, QrCode, Eye, EyeOff, Save, X, Instagram, Facebook, MapPinned, Coffee, UtensilsCrossed, ChevronDown, CheckCircle2, AlertCircle, ShieldAlert, Store, Star, Sparkles, ArrowUp, ArrowDown, Bell, BellRing } from 'lucide-react'
 
 const demoCategories = [
   { id: 'hot', name: 'مشروبات ساخنة', sort_order: 1, is_visible: true },
@@ -24,6 +24,44 @@ const initialSettings = {
   primary_color: '#1d4738', logo_url: '', cover_url: ''
 }
 const emptyProduct = { name: '', name_ar: '', description: '', description_ar: '', price: '', category_id: '', image_url: '', is_available: true, is_featured: false }
+
+// تجهيز الصور محلياً قبل رفعها إلى Supabase Storage.
+const optimizeImageForUpload = async (file) => {
+  let bitmap
+  let objectUrl
+  try {
+    if (typeof createImageBitmap === 'function') {
+      bitmap = await createImageBitmap(file)
+    } else {
+      objectUrl = URL.createObjectURL(file)
+      bitmap = await new Promise((resolve, reject) => {
+        const image = new Image()
+        image.onload = () => resolve(image)
+        image.onerror = () => reject(new Error('تعذر قراءة الصورة'))
+        image.src = objectUrl
+      })
+    }
+
+    const maxDimension = 1600
+    const scale = Math.min(1, maxDimension / Math.max(bitmap.width, bitmap.height))
+    const width = Math.max(1, Math.round(bitmap.width * scale))
+    const height = Math.max(1, Math.round(bitmap.height * scale))
+    const canvas = document.createElement('canvas')
+    canvas.width = width
+    canvas.height = height
+    const context = canvas.getContext('2d')
+    if (!context) throw new Error('تعذر تجهيز الصورة للضغط')
+    context.drawImage(bitmap, 0, 0, width, height)
+
+    const compressedBlob = await new Promise((resolve, reject) => {
+      canvas.toBlob(blob => blob ? resolve(blob) : reject(new Error('تعذر تحويل الصورة إلى WebP')), 'image/webp', 0.88)
+    })
+    return compressedBlob
+  } finally {
+    if (bitmap && typeof bitmap.close === 'function') bitmap.close()
+    if (objectUrl) URL.revokeObjectURL(objectUrl)
+  }
+}
 
 const arabicValue = (value) => {
   const result = String(value || '').trim()
@@ -120,6 +158,7 @@ export default function App() {
   const [savingProduct, setSavingProduct] = useState(false)
   const [savingCategory, setSavingCategory] = useState(false)
   const productActionLocks = useRef(new Set())
+  const orderSubmitLock = useRef(false)
   const [session, setSession] = useState(null)
   const [authReady, setAuthReady] = useState(false)
   const [loading, setLoading] = useState(false)
@@ -218,6 +257,21 @@ export default function App() {
     } finally { setMyOrdersLoading(false) }
   }
   const openMyOrders = () => { setPage('my-orders'); loadMyOrders() }
+
+  // Refresh customer tracking periodically so an order disappears shortly after
+  // its 24-hour server-side visibility window expires, even if the page stays open.
+  useEffect(() => {
+    if (page !== 'my-orders' || !supabase) return
+    const refreshVisibleOrders = () => {
+      if (document.visibilityState === 'visible') loadMyOrders()
+    }
+    const interval = window.setInterval(refreshVisibleOrders, 60000)
+    document.addEventListener('visibilitychange', refreshVisibleOrders)
+    return () => {
+      window.clearInterval(interval)
+      document.removeEventListener('visibilitychange', refreshVisibleOrders)
+    }
+  }, [page, session])
 
   const loadOrders = async () => {
     if (!supabase || !allowedOwner) return
@@ -451,9 +505,13 @@ export default function App() {
     if (file.size > 5 * 1024 * 1024) return notify('الحد الأقصى لحجم الصورة 5MB', 'error')
     setUploading(true)
     try {
-      const ext = file.type === 'image/png' ? 'png' : file.type === 'image/webp' ? 'webp' : 'jpg'
-      const path = `${Date.now()}-${crypto.randomUUID()}.${ext}`
-      const { error } = await supabase.storage.from('menugo-assets').upload(path, file, { upsert: false, contentType: file.type })
+      const optimizedImage = await optimizeImageForUpload(file)
+      const path = `${Date.now()}-${crypto.randomUUID()}.webp`
+      const { error } = await supabase.storage.from('menugo-assets').upload(path, optimizedImage, {
+        upsert: false,
+        contentType: 'image/webp',
+        cacheControl: '604800'
+      })
       if (error) { notify(saveFailureMessage(error, 'رفع الصورة'), 'error'); return false }
       const { data } = supabase.storage.from('menugo-assets').getPublicUrl(path)
       if (!data?.publicUrl) { notify('تم رفع الصورة، لكن تعذر الحصول على رابطها. حدّث الصفحة قبل إعادة الرفع.', 'error'); return false }
@@ -816,19 +874,27 @@ export default function App() {
     window.open(url, '_blank', 'noopener,noreferrer')
   }
   const submitInternalOrder = async () => {
+    if (orderSubmitLock.current) return
     if (new URLSearchParams(window.location.search).has('table') && !activeRestaurantTable && !activeQrIsGeneral) return notify('تعذر التعرف على الطاولة من رمز QR؛ أعد فتح رمز الطاولة الصحيح')
     if (!settings.internal_orders_enabled) return notify('الطلبات الداخلية غير مفعلة')
     if (!cart.length) return notify('السلة فارغة')
     if (!supabase) return notify('يلزم ربط Supabase لتسجيل الطلب داخلياً')
-    let visitorId = localStorage.getItem('menugo_visitor_id')
-    if (!visitorId) { visitorId = crypto.randomUUID(); localStorage.setItem('menugo_visitor_id', visitorId) }
-    const { error } = await supabase.from('orders').insert({
-      visitor_id: visitorId,
-      items: cart.map(({id,name,price,quantity}) => ({ product_id:id, name, price, quantity })),
-      total, notes: orderNote, status: 'new', restaurant_table_id: activeRestaurantTable?.id || null, table_name: activeRestaurantTable?.table_name || null
-    })
-    if (error) return notify(`تعذر تسجيل الطلب: ${error.message}`)
-    setCart([]); setOrderNote(''); notify('تم إرسال الطلب بنجاح')
+    orderSubmitLock.current = true
+    try {
+      let visitorId = localStorage.getItem('menugo_visitor_id')
+      if (!visitorId) { visitorId = crypto.randomUUID(); localStorage.setItem('menugo_visitor_id', visitorId) }
+      const { error } = await supabase.from('orders').insert({
+        visitor_id: visitorId,
+        items: cart.map(({id,name,price,quantity}) => ({ product_id:id, name, price, quantity })),
+        total, notes: orderNote, status: 'new', restaurant_table_id: activeRestaurantTable?.id || null, table_name: activeRestaurantTable?.table_name || null
+      })
+      if (error) return notify(`تعذر تسجيل الطلب: ${error.message}`)
+      setCart([]); setOrderNote(''); notify('تم إرسال الطلب بنجاح')
+    } catch (error) {
+      notify(`تعذر تسجيل الطلب: ${error.message || 'تحقق من الاتصال وحاول مجدداً'}`, 'error')
+    } finally {
+      orderSubmitLock.current = false
+    }
   }
   const login = async () => {
     if (!supabase) return notify('أضف إعدادات Supabase أولاً')
@@ -859,11 +925,10 @@ export default function App() {
         {allowedOwner ? <>
           <button className={page==='menu'?'active':''} onClick={()=>setPage('menu')}>المينيو</button>
           <button className={page==='admin'?'active':''} onClick={()=>setPage('admin')}>لوحة الإدارة</button>
-          <button className={page==='cart'?'active':''} onClick={()=>setPage('cart')}>السلة <span className="count">{count}</span></button>
-          {page==='admin'&&<>
-            <button className={activeAdminSection==='products'?'active':''} onClick={() => setActiveAdminSection('products')}>المنتجات</button>
-            <button className={activeAdminSection==='orders'?'active':''} onClick={() => setActiveAdminSection('orders')}>الطلبات</button>
-          </>}
+          {isAdminEntry ? <>
+            <button className="admin-notification-link" onClick={() => { setActiveAdminSection('reviews'); loadReviews() }} aria-label="إشعارات التقييمات" title="إشعارات التقييمات"><Bell size={18}/><span>الإشعارات</span>{reviews.length>0&&<i className="notification-count">{reviews.length}</i>}</button>
+            <button className="admin-notification-link order-notification-link" onClick={() => { setActiveAdminSection('orders'); loadOrders() }} aria-label="تنبيهات الطلبات الجديدة" title="الطلبات الجديدة"><BellRing size={18}/><span>الطلبات</span>{newOrdersCount>0&&<i className="notification-count">{newOrdersCount}</i>}</button>
+          </> : <button className={page==='cart'?'active':''} onClick={()=>setPage('cart')}>السلة <span className="count">{count}</span></button>}
         </> : <>
           <button className={`customer-menu-link ${page==='menu'?'active':''}`} onClick={()=>setPage('menu')}>المينيو</button>
           <button className={page==='cart'?'active':''} onClick={()=>setPage('cart')}><ShoppingCart size={17}/> السلة <span className="count">{count}</span></button>
@@ -887,7 +952,7 @@ export default function App() {
       <main id="menu-list" className="content">
         <div className="section-heading"><div><span className="eyebrow">قائمتنا</span><h2>قائمتنا</h2><p>اختر من أشهى الأصناف المحضرة بعناية</p></div><label className="search-box"><Search size={18}/><input value={search} onChange={e=>setSearch(e.target.value)} placeholder="ابحث عن طبق أو مشروب..."/></label></div>
         <div className="category-tabs"><button className={activeCategory==='all'?'selected':''} onClick={()=>setActiveCategory('all')}>الكل</button>{visibleCategories.map(c=><button key={c.id} className={activeCategory===c.id?'selected':''} onClick={()=>setActiveCategory(c.id)}>{localized(c,'name')}</button>)}</div>
-        <div className="product-grid">{shownProducts.map(p=><article className="product-card" key={p.id} onClick={()=>trackProductView(p.id)}><div className="product-image">{p.image_url?<img src={p.image_url} alt={p.name}/>:<div className="food-placeholder"><UtensilsCrossed size={34}/></div>}{p.is_featured&&<span className="featured">اختيار مميز</span>}</div><div className="product-info"><div><h3>{localized(p,'name')}</h3><p>{localized(p,'description')}</p></div><div className="product-bottom"><strong>{money(p.price,settings.currency)}</strong><button className="add-btn" onClick={()=>addToCart(p)} aria-label="أضف إلى السلة"><Plus size={18}/></button></div><button className="tiny-btn review-trigger" onClick={e=>{e.stopPropagation();setReviewDraft({product:p,rating:5,comment:''})}}>قيّم هذا المنتج</button></div></article>)}</div>
+        <div className="product-grid">{shownProducts.map(p=><article className="product-card" key={p.id} onClick={()=>trackProductView(p.id)}><div className="product-image">{p.image_url?<img src={p.image_url} alt={p.name}/>:<div className="food-placeholder"><UtensilsCrossed size={34}/></div>}{p.is_featured&&<span className="featured">اختيار مميز</span>}</div><div className="product-info"><div><h3>{localized(p,'name')}</h3><p>{localized(p,'description')}</p></div><div className="product-bottom"><strong>{money(p.price,settings.currency)}</strong><button className="add-btn" onClick={()=>addToCart(p)} aria-label="إضافة المنتج">إضافة</button></div><button className="tiny-btn review-trigger" onClick={e=>{e.stopPropagation();setReviewDraft({product:p,rating:5,comment:''})}}>قيّم هذا المنتج</button></div></article>)}</div>
         {!shownProducts.length&&<div className="empty-state">لا توجد منتجات مطابقة حالياً.</div>}
       </main>
       <footer id="restaurant-info" className="footer"><div className="socials">
@@ -1012,6 +1077,6 @@ export default function App() {
         </div>
       </section>
     </div>}
-    {page==='menu'&&cart.length>0&&<button className="floating-cart" onClick={()=>setPage('cart')}><ShoppingCart/> عرض السلة <b>{count}</b><strong>{money(total,settings.currency)}</strong></button>}
+    {page==='menu'&&cart.length>0&&<button className="floating-cart" onClick={()=>setPage('cart')}><ShoppingCart/> إرسال الطلب <b>{count}</b><strong>{money(total,settings.currency)}</strong></button>}
   </div>
 }
