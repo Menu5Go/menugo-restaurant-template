@@ -984,20 +984,17 @@ body {
 .admin-overview-cards-live button:nth-child(2) strong{font-size:22px;overflow-wrap:anywhere}
 @media(max-width:900px){.admin-quick-actions{grid-template-columns:repeat(2,minmax(0,1fr))}}
 @media(max-width:650px){
-  .admin-content{padding-bottom:116px}
-  .admin-sidebar{right:12px;left:12px;bottom:max(12px,env(safe-area-inset-bottom));display:flex;align-items:stretch;justify-content:space-around;gap:3px;padding:7px;overflow:visible}
+  .admin-content{padding-bottom:166px}
+  .admin-sidebar{right:12px;left:12px;bottom:max(12px,env(safe-area-inset-bottom));display:grid;grid-template-columns:repeat(4,minmax(0,1fr));align-items:stretch;justify-content:stretch;gap:4px;padding:8px;overflow:visible}
   .admin-sidebar-caption{display:none!important}
-  .admin-sidebar>button{position:relative;flex:1 1 0;width:auto;min-width:0;min-height:57px;max-width:none;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:4px;padding:5px 3px;border-radius:13px;font-size:10px;white-space:nowrap}
-  .admin-sidebar>button svg{width:20px;height:20px}
-  .admin-sidebar>button span{flex:0 0 auto}
-  .admin-sidebar>button i{position:absolute;top:2px;right:calc(50% - 23px);margin:0;min-width:17px;height:17px;padding:0 4px;font-size:9px}
-  .admin-sidebar>.admin-more-toggle{display:flex!important}
-  .admin-sidebar-extra{display:none;position:absolute;right:0;left:0;bottom:calc(100% + 10px);grid-template-columns:repeat(2,minmax(0,1fr));gap:5px;padding:10px;border:1px solid rgba(255,255,255,.9);border-radius:19px;background:rgba(250,253,250,.96);backdrop-filter:blur(22px);-webkit-backdrop-filter:blur(22px);box-shadow:0 16px 42px rgba(15,55,32,.18),inset 0 1px 0 #fff}
-  .admin-sidebar-more-open .admin-sidebar-extra{display:grid}
-  .admin-sidebar-extra .admin-sidebar-caption{display:block!important;grid-column:1/-1;padding:8px 8px 2px}
-  .admin-sidebar-extra button{width:100%;min-height:43px;flex-direction:row;justify-content:flex-start;gap:9px;padding:8px 10px;border-radius:11px;font-size:11px}
-  .admin-sidebar-extra button svg{width:17px;height:17px}
-  .admin-sidebar-extra button span{flex:1}
+  .admin-sidebar button{position:relative;min-width:0;width:100%;min-height:62px;max-width:none;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:4px;padding:5px 2px;border-radius:12px;font-size:9px;line-height:1.2;white-space:normal;text-align:center}
+  .admin-sidebar button svg{width:19px;height:19px}
+  .admin-sidebar button span{flex:0 1 auto;max-width:100%;overflow-wrap:anywhere}
+  .admin-sidebar button i{position:absolute;top:2px;right:calc(50% - 23px);margin:0;min-width:17px;height:17px;padding:0 4px;font-size:9px}
+  .admin-sidebar-extra{display:contents!important}
+  .admin-sidebar-extra button{min-height:62px;flex-direction:column;justify-content:center;gap:4px;padding:5px 2px;border-radius:12px;font-size:9px}
+  .admin-sidebar-extra button svg{width:19px;height:19px}
+  .admin-sidebar-extra button span{flex:0 1 auto}
   .admin-quick-actions{gap:8px;margin-bottom:17px}
   .admin-quick-actions button{min-height:46px;font-size:11px}
   .admin-recent-orders{padding:14px 11px;margin-bottom:19px}
@@ -1072,4 +1069,17 @@ body {
  .order-card-heading b{font-size:12px}
  .order-card-heading>strong{font-size:13px}
  .order-quick-actions button{flex:1 1 auto}
+}
+
+/* Customer navigation: menu, cart, then order tracking */
+.customer-menu-link { min-width: 78px; font-size: 13px !important; font-weight: 800 !important; }
+.customer-orders-page { min-height: 55vh; }
+.customer-orders-list { display: grid; gap: 13px; }
+.customer-order-card { padding: 18px; }
+.customer-order-status { display: inline-flex; align-items: center; margin-top: 12px; padding: 7px 12px; border-radius: 999px; font-size: 12px; font-weight: 800; background: #edf4ef; color: var(--brand); }
+@media (max-width: 650px) {
+  .top-nav { justify-content: flex-start; gap: 3px; padding-inline-end: 3px; }
+  .top-nav button { padding: 8px 8px; font-size: 11px; }
+  .top-nav .customer-menu-link { min-width: 76px; padding-inline: 10px; font-size: 13px !important; }
+  .top-nav button:nth-child(3) { display: inline-flex; }
 }

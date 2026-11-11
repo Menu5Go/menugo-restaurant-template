@@ -1,5 +1,5 @@
-export const money = (value, currency = 'EUR') =>
-  new Intl.NumberFormat('ar', { style: 'currency', currency, maximumFractionDigits: 2 }).format(Number(value || 0))
+export const money = (value) =>
+  new Intl.NumberFormat('ar', { style: 'currency', currency: 'SYP', maximumFractionDigits: 2 }).format(Number(value || 0))
 
 export const whatsappUrl = (phone, message) => {
   const number = String(phone || '').replace(/\D/g, '')
