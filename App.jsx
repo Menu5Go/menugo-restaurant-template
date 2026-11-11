@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { supabase, isSupabaseConfigured, ownerEmail } from './supabase.js'
 import { money, whatsappUrl } from './format.js'
-import { Menu, ShoppingCart, Search, Plus, Minus, Trash2, SlidersHorizontal, LogIn, LogOut, Tags, ClipboardList, QrCode, Eye, EyeOff, Save, X, Instagram, Facebook, MapPinned, Coffee, UtensilsCrossed, ChevronDown, CheckCircle2, AlertCircle, ShieldAlert, Store, Star, Sparkles, ArrowUp, ArrowDown } from 'lucide-react'
+import { Menu, ShoppingCart, Search, Plus, Minus, Trash2, SlidersHorizontal, LogIn, LogOut, Tags, ClipboardList, QrCode, Eye, EyeOff, Save, X, Instagram, Facebook, MapPinned, Coffee, UtensilsCrossed, ChevronDown, CheckCircle2, AlertCircle, ShieldAlert, Store, Star, Sparkles, ArrowUp, ArrowDown, MoreHorizontal } from 'lucide-react'
 
 const demoCategories = [
   { id: 'hot', name: 'مشروبات ساخنة', sort_order: 1, is_visible: true },
@@ -97,6 +97,7 @@ export default function App() {
   const [settings, setSettings] = useState(initialSettings)
   const [categoryDraftAr, setCategoryDraftAr] = useState('')
   const [orders, setOrders] = useState([])
+  const [orderDashboardStats, setOrderDashboardStats] = useState(null)
   const [reviews, setReviews] = useState([])
   const [reviewDraft, setReviewDraft] = useState({ product: null, rating: 5, comment: '' })
   const [uploading, setUploading] = useState(false)
@@ -108,6 +109,16 @@ export default function App() {
   const [menuDataReady, setMenuDataReady] = useState(!supabase)
   const menuRestoreApplied = useRef(false)
   const [page, setPage] = useState(() => new URLSearchParams(window.location.search).get('admin') === '1' ? 'admin' : 'menu')
+  const [activeAdminSection, setActiveAdminSection] = useState('analytics')
+  const [showAdminMore, setShowAdminMore] = useState(false)
+  const [settingsTab, setSettingsTab] = useState('restaurant')
+  const [updatingOrderId, setUpdatingOrderId] = useState(null)
+  const [updatingProductId, setUpdatingProductId] = useState(null)
+  const [updatingProductPublishId, setUpdatingProductPublishId] = useState(null)
+  const [savingSettings, setSavingSettings] = useState(false)
+  const [savingProduct, setSavingProduct] = useState(false)
+  const [savingCategory, setSavingCategory] = useState(false)
+  const productActionLocks = useRef(new Set())
   const [session, setSession] = useState(null)
   const [authReady, setAuthReady] = useState(false)
   const [loading, setLoading] = useState(false)
@@ -175,6 +186,7 @@ export default function App() {
     if (!supabase || page !== 'admin' || !allowedOwner) return
     loadAnalytics()
     loadOrders()
+    loadOrderDashboardStats()
     loadReviews()
     loadRestaurantTables()
   }, [page, session, products])
@@ -197,6 +209,53 @@ export default function App() {
     if (error) return notify(`تعذر تحميل الطلبات: ${error.message}`)
     setOrders(data || [])
     seenOrderIdsRef.current = new Set((data || []).map(order => order.id))
+  }
+
+  // إحصائيات مستقلة عن قائمة آخر 200 طلب، مع احترام اليوم حسب توقيت جهاز مدير المطعم.
+  const loadOrderDashboardStats = async ({ silent = false } = {}) => {
+    if (!supabase || !allowedOwner) return
+    const dayStart = new Date()
+    dayStart.setHours(0, 0, 0, 0)
+    const nextDay = new Date(dayStart)
+    nextDay.setDate(nextDay.getDate() + 1)
+    const startIso = dayStart.toISOString()
+    const endIso = nextDay.toISOString()
+    try {
+      let todayOrdersCount = 0
+      let todayRevenueCents = 0
+      let offset = 0
+      const pageSize = 1000
+      while (true) {
+        const { data, count, error } = await supabase
+          .from('orders')
+          .select('id,total,status,created_at', { count: offset === 0 ? 'exact' : undefined })
+          .gte('created_at', startIso)
+          .lt('created_at', endIso)
+          .order('created_at', { ascending: true })
+          .range(offset, offset + pageSize - 1)
+        if (error) throw error
+        const rows = data || []
+        if (offset === 0 && Number.isFinite(count)) todayOrdersCount = count
+        for (const order of rows) {
+          if (order.status !== 'cancelled') todayRevenueCents += Math.round(Number(order.total || 0) * 100)
+        }
+        if (rows.length < pageSize) {
+          if (!Number.isFinite(count)) todayOrdersCount = offset + rows.length
+          break
+        }
+        offset += pageSize
+      }
+      const { count: newOrdersCount, error: newOrdersError } = await supabase
+        .from('orders')
+        .select('id', { count: 'exact', head: true })
+        .eq('status', 'new')
+      if (newOrdersError) throw newOrdersError
+      setOrderDashboardStats({ todayOrders: todayOrdersCount, todayRevenue: todayRevenueCents / 100, newOrdersCount: newOrdersCount || 0 })
+    } catch (error) {
+      if (!silent) notify(`تعذر تحديث إحصائيات الطلبات: ${error.message || 'خطأ في الاتصال'}`, 'error')
+      return false
+    }
+    return true
   }
   const playNewOrderSound = () => {
     try {
@@ -241,6 +300,12 @@ export default function App() {
     return () => { active = false; window.clearInterval(interval) }
   }, [page, session, settings.order_sound_enabled])
 
+  useEffect(() => {
+    if (!supabase || page !== 'admin' || !allowedOwner) return
+    const interval = window.setInterval(() => loadOrderDashboardStats({ silent: true }), 30000)
+    return () => window.clearInterval(interval)
+  }, [page, session])
+
   const loadRestaurantTables = async () => {
     if (!supabase || !allowedOwner) return
     setTableLoading(true)
@@ -281,7 +346,7 @@ export default function App() {
     if (!image) return notify('رمز QR غير جاهز للطباعة')
     const popup = window.open('', '_blank', 'width=600,height=700')
     if (!popup) return notify('اسمح بفتح النوافذ المنبثقة للطباعة')
-    popup.document.write(`<html lang="ar" dir="rtl"><head><title>رمز الطاولة</title><style>body{font-family:Arial;text-align:center;padding:30px}img{width:320px;max-width:90%}</style></head><body><h2>${String(table.table_name).replace(/[&<>"]/g, '')}</h2><img src="${image}"/><script>window.onload=()=>window.print()<\/script></body></html>`)
+    popup.document.write(`<html lang="ar" dir="rtl"><head><title>رمز الطاولة</title><style>body{font-family:Tahoma,Arial,sans-serif;text-align:center;padding:30px}img{width:320px;max-width:90%}</style></head><body><h2>${String(table.table_name).replace(/[&<>"]/g, '')}</h2><img src="${image}"/><script>window.onload=()=>window.print()<\/script></body></html>`)
     popup.document.close()
   }
   const loadReviews = async () => {
@@ -291,23 +356,98 @@ export default function App() {
     setReviews(data || [])
   }
   const changeOrderStatus = async (id, status) => {
-    const { error } = await supabase.from('orders').update({ status }).eq('id', id)
-    if (error) return notify(error.message)
-    setOrders(prev => prev.map(o => o.id === id ? { ...o, status } : o))
+    if (updatingOrderId) return false
+    if (supabase && typeof navigator !== 'undefined' && navigator.onLine === false) {
+      notify('لا يوجد اتصال بالإنترنت. أعد الاتصال قبل تحديث حالة الطلب.', 'error')
+      return false
+    }
+    setUpdatingOrderId(id)
+    try {
+      if (supabase) {
+        if (!isUuid(id)) { notify('تعذر تحديث الطلب: معرّف الطلب غير صالح.', 'error'); return false }
+        const { error } = await supabase.from('orders').update({ status }).eq('id', id)
+        if (error) { notify(saveFailureMessage(error, 'تحديث حالة الطلب'), 'error'); return false }
+      }
+      setOrders(prev => prev.map(o => o.id === id ? { ...o, status } : o))
+      notify(`تم تحديث حالة الطلب إلى ${orderStatusLabel(status)}`)
+      if (supabase) loadOrderDashboardStats({ silent: true })
+      return true
+    } catch (error) {
+      notify(saveFailureMessage(error, 'تحديث حالة الطلب'), 'error')
+      return false
+    } finally { setUpdatingOrderId(null) }
+  }
+  const toggleProductAvailability = async (product) => {
+    if (!product?.id || productActionLocks.current.size > 0 || updatingProductId || updatingProductPublishId) return
+    productActionLocks.current.add(product.id)
+    const nextValue = product.is_available === false
+    setUpdatingProductId(product.id)
+    try {
+      if (supabase) {
+        if (!isUuid(product.id)) { notify('تعذر تحديث التوفر: معرّف المنتج غير صالح.', 'error'); return false }
+        if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+          notify('لا يوجد اتصال بالإنترنت. أعد الاتصال ثم حاول مجدداً.', 'error'); return false
+        }
+        const { error } = await supabase.from('products').update({ is_available: nextValue }).eq('id', product.id)
+        if (error) { notify(saveFailureMessage(error, 'تحديث توفر المنتج'), 'error'); return false }
+      }
+      setProducts(prev => prev.map(item => item.id === product.id ? { ...item, is_available: nextValue } : item))
+      notify(nextValue ? 'تم تفعيل توفر المنتج' : 'تم إيقاف توفر المنتج')
+      return true
+    } catch (error) {
+      notify(saveFailureMessage(error, 'تحديث توفر المنتج'), 'error')
+      return false
+    } finally {
+      productActionLocks.current.delete(product.id)
+      setUpdatingProductId(null)
+    }
+  }
+  const toggleProductPublished = async (product) => {
+    if (!product?.id || productActionLocks.current.size > 0 || updatingProductId || updatingProductPublishId) return
+    productActionLocks.current.add(product.id)
+    const nextValue = product.is_published === false
+    setUpdatingProductPublishId(product.id)
+    try {
+      if (supabase) {
+        if (!isUuid(product.id)) { notify('تعذر تحديث ظهور المنتج: معرّف المنتج غير صالح.', 'error'); return false }
+        if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+          notify('لا يوجد اتصال بالإنترنت. أعد الاتصال ثم حاول مجدداً.', 'error'); return false
+        }
+        const { error } = await supabase.from('products').update({ is_published: nextValue }).eq('id', product.id)
+        if (error) { notify(saveFailureMessage(error, nextValue ? 'إظهار المنتج' : 'إخفاء المنتج'), 'error'); return false }
+      }
+      setProducts(prev => prev.map(item => item.id === product.id ? { ...item, is_published: nextValue } : item))
+      notify(nextValue ? 'تم إظهار المنتج' : 'تم إخفاء المنتج')
+      return true
+    } catch (error) {
+      notify(saveFailureMessage(error, nextValue ? 'إظهار المنتج' : 'إخفاء المنتج'), 'error')
+      return false
+    } finally {
+      productActionLocks.current.delete(product.id)
+      setUpdatingProductPublishId(null)
+    }
   }
   const uploadImage = async (file, onUploaded) => {
-    if (!supabase || !allowedOwner) return notify('يلزم تسجيل دخول المدير وتهيئة Supabase')
-    if (!file || !['image/jpeg','image/png','image/webp'].includes(file.type)) return notify('اختر صورة بصيغة JPG أو PNG أو WebP')
-    if (file.size > 5 * 1024 * 1024) return notify('الحد الأقصى لحجم الصورة 5MB')
+    if (uploading) return false
+    if (!supabase || !allowedOwner) return notify('يلزم تسجيل دخول المدير وتهيئة Supabase', 'error')
+    if (typeof navigator !== 'undefined' && navigator.onLine === false) return notify('لا يوجد اتصال بالإنترنت. أعد الاتصال قبل رفع الصورة.', 'error')
+    if (!file || !['image/jpeg','image/png','image/webp'].includes(file.type)) return notify('اختر صورة بصيغة JPG أو PNG أو WebP', 'error')
+    if (file.size > 5 * 1024 * 1024) return notify('الحد الأقصى لحجم الصورة 5MB', 'error')
     setUploading(true)
-    const ext = file.type === 'image/png' ? 'png' : file.type === 'image/webp' ? 'webp' : 'jpg'
-    const path = `${Date.now()}-${crypto.randomUUID()}.${ext}`
-    const { error } = await supabase.storage.from('menugo-assets').upload(path, file, { upsert: false, contentType: file.type })
-    setUploading(false)
-    if (error) return notify(`فشل رفع الصورة: ${error.message}`)
-    const { data } = supabase.storage.from('menugo-assets').getPublicUrl(path)
-    onUploaded(data.publicUrl)
-    notify('تم رفع الصورة بنجاح')
+    try {
+      const ext = file.type === 'image/png' ? 'png' : file.type === 'image/webp' ? 'webp' : 'jpg'
+      const path = `${Date.now()}-${crypto.randomUUID()}.${ext}`
+      const { error } = await supabase.storage.from('menugo-assets').upload(path, file, { upsert: false, contentType: file.type })
+      if (error) { notify(saveFailureMessage(error, 'رفع الصورة'), 'error'); return false }
+      const { data } = supabase.storage.from('menugo-assets').getPublicUrl(path)
+      if (!data?.publicUrl) { notify('تم رفع الصورة، لكن تعذر الحصول على رابطها. حدّث الصفحة قبل إعادة الرفع.', 'error'); return false }
+      onUploaded(data.publicUrl)
+      notify('تم رفع الصورة بنجاح')
+      return true
+    } catch (error) {
+      notify(saveFailureMessage(error, 'رفع الصورة'), 'error')
+      return false
+    } finally { setUploading(false) }
   }
   const submitReview = async () => {
     if (!reviewDraft.product || !supabase) return
@@ -434,6 +574,14 @@ export default function App() {
   ), [products, activeCategory, search])
   const total = cart.reduce((sum, item) => sum + Number(item.price) * item.quantity, 0)
   const count = cart.reduce((sum, item) => sum + item.quantity, 0)
+  const todayKey = new Date().toDateString()
+  const localTodayOrders = orders.filter(order => order.created_at && new Date(order.created_at).toDateString() === todayKey)
+  const orderStatsReady = !supabase || orderDashboardStats !== null
+  const todayOrdersCount = orderDashboardStats?.todayOrders ?? (supabase ? 0 : localTodayOrders.length)
+  const todayRevenue = orderDashboardStats?.todayRevenue ?? (supabase ? 0 : localTodayOrders.filter(order => order.status !== 'cancelled').reduce((sum, order) => sum + Number(order.total || 0), 0))
+  const newOrdersCount = orderDashboardStats?.newOrdersCount ?? (supabase ? 0 : orders.filter(order => order.status === 'new').length)
+  const availableProductsCount = products.filter(product => product.is_available !== false && product.is_published !== false).length
+  const orderStatusLabel = status => ({ new: 'جديد', preparing: 'قيد التحضير', ready: 'جاهز', completed: 'مكتمل', cancelled: 'ملغي' }[status] || 'غير محدد')
 
   const notify = (msg, kind) => {
     const rawMessage = String(msg ?? '')
@@ -441,6 +589,13 @@ export default function App() {
     const inferredKind = kind || (/تعذر|فشل|خطأ|يلزم|غير متاح|فارغة|أدخل|اختر|الحد الأقصى/i.test(friendlyMessage) ? 'error' : 'success')
     setNoticeKind(inferredKind)
     setNotice(friendlyMessage)
+  }
+  const saveFailureMessage = (error, operation = 'الحفظ') => {
+    const message = String(error?.message || error || '')
+    const networkFailure = typeof navigator !== 'undefined' && navigator.onLine === false || /failed to fetch|networkerror|network request failed|load failed|fetch failed|err_internet_disconnected|connection|timed? ?out|aborted/i.test(message)
+    return networkFailure
+      ? `انقطع الاتصال أثناء ${operation}. لم نتمكن من تأكيد وصول التغيير إلى قاعدة البيانات. تحقق من الإنترنت ثم حدّث القائمة قبل إعادة المحاولة لتجنب تكرار العملية.`
+      : `تعذر ${operation}: ${message || 'حدث خطأ غير متوقع'}`
   }
   useEffect(() => {
     if (!notice) return
@@ -455,7 +610,9 @@ export default function App() {
   })
   const changeQty = (id, delta) => setCart(prev => prev.map(x => x.id === id ? { ...x, quantity: x.quantity + delta } : x).filter(x => x.quantity > 0))
   const saveSettings = async () => {
+    if (savingSettings) return
     if (!supabase) return notify('أضف إعدادات Supabase في ملف .env أولاً')
+    if (typeof navigator !== 'undefined' && navigator.onLine === false) return notify('لا يوجد اتصال بالإنترنت. أعد الاتصال قبل حفظ الإعدادات.', 'error')
     const rawLat = settings.restaurant_latitude
     const rawLon = settings.restaurant_longitude
     const hasLat = rawLat !== '' && rawLat != null
@@ -466,10 +623,16 @@ export default function App() {
     if (hasLat && (!Number.isFinite(latitude) || latitude < -90 || latitude > 90 || !Number.isFinite(longitude) || longitude < -180 || longitude > 180)) {
       return notify('إحداثيات الموقع غير صحيحة؛ تحقق من خط العرض والطول')
     }
-    const { error } = await supabase.from('restaurant_settings').upsert({
-      ...settings, restaurant_latitude: latitude, restaurant_longitude: longitude, id: 1
-    })
-    notify(error ? `تعذر الحفظ: ${error.message}` : 'تم حفظ إعدادات المطعم')
+    setSavingSettings(true)
+    try {
+      const { error } = await supabase.from('restaurant_settings').upsert({
+        ...settings, restaurant_latitude: latitude, restaurant_longitude: longitude, id: 1
+      })
+      if (error) return notify(saveFailureMessage(error, 'حفظ الإعدادات'), 'error')
+      notify('تم حفظ إعدادات المطعم')
+    } catch (error) {
+      notify(saveFailureMessage(error, 'حفظ الإعدادات'), 'error')
+    } finally { setSavingSettings(false) }
   }
   const calculateRestaurantDistance = async () => {
     const destination = restaurantCoordinates(settings)
@@ -543,22 +706,29 @@ export default function App() {
     }
   }
   const saveCategory = async () => {
+    if (savingCategory) return
     const name = categoryDraftAr.trim()
     if (!name) return notify('أدخل اسم القسم')
+    if (supabase && typeof navigator !== 'undefined' && navigator.onLine === false) return notify('لا يوجد اتصال بالإنترنت. أعد الاتصال قبل حفظ القسم.', 'error')
     const payload = { name, name_ar: name, sort_order: categories.length + 1, is_visible: true, is_published: true }
-    if (supabase) {
-      if (editingCategory && !isUuid(editingCategory)) return notify('تعذر تعديل القسم: معرّف القسم غير صالح. حدّث الصفحة ثم حاول مجدداً.', 'error')
-      const query = editingCategory
-        ? supabase.from('categories').update({ name, name_ar: name }).eq('id', editingCategory)
-        : supabase.from('categories').insert(payload)
-      const { error } = await query
-      if (error) return notify(`تعذر حفظ القسم: ${error.message}`, 'error')
-      const { data, error: reloadError } = await supabase.from('categories').select('*').order('sort_order')
-      if (reloadError) return notify(`تم الحفظ لكن تعذر تحديث قائمة الأقسام: ${reloadError.message}`, 'error')
-      setCategories(data || [])
-    } else if (editingCategory) setCategories(prev => prev.map(c => c.id === editingCategory ? { ...c, ...payload } : c))
-    else setCategories(prev => [...prev, { ...payload, id: crypto.randomUUID() }])
-    setCategoryDraftAr(''); setEditingCategory(null); notify('تم حفظ القسم')
+    setSavingCategory(true)
+    try {
+      if (supabase) {
+        if (editingCategory && !isUuid(editingCategory)) return notify('تعذر تعديل القسم: معرّف القسم غير صالح. حدّث الصفحة ثم حاول مجدداً.', 'error')
+        const query = editingCategory
+          ? supabase.from('categories').update({ name, name_ar: name }).eq('id', editingCategory)
+          : supabase.from('categories').insert(payload)
+        const { error } = await query
+        if (error) return notify(saveFailureMessage(error, 'حفظ القسم'), 'error')
+        const { data, error: reloadError } = await supabase.from('categories').select('*').order('sort_order')
+        if (reloadError) return notify(`تم حفظ القسم، لكن تعذر تحديث القائمة: ${saveFailureMessage(reloadError, 'تحديث قائمة الأقسام')}`, 'error')
+        setCategories(data || [])
+      } else if (editingCategory) setCategories(prev => prev.map(c => c.id === editingCategory ? { ...c, ...payload } : c))
+      else setCategories(prev => [...prev, { ...payload, id: crypto.randomUUID() }])
+      setCategoryDraftAr(''); setEditingCategory(null); notify('تم حفظ القسم')
+    } catch (error) {
+      notify(saveFailureMessage(error, 'حفظ القسم'), 'error')
+    } finally { setSavingCategory(false) }
   }
   const deleteCategory = async (id) => {
     setConfirmDialog({
@@ -578,21 +748,31 @@ export default function App() {
     })
   }
   const saveProduct = async () => {
+    if (savingProduct) return
     if (!productDraft.name_ar.trim() || !productDraft.category_id || productDraft.price === '') return notify('أكمل اسم المنتج والقسم والسعر')
+    if (supabase && typeof navigator !== 'undefined' && navigator.onLine === false) return notify('لا يوجد اتصال بالإنترنت. أعد الاتصال قبل حفظ المنتج.', 'error')
     const payload = { name: productDraft.name_ar.trim(), name_ar: productDraft.name_ar.trim(), description: productDraft.description_ar || '', description_ar: productDraft.description_ar || '', price: Number(productDraft.price), category_id: productDraft.category_id, image_url: productDraft.image_url, is_available: productDraft.is_available, is_featured: productDraft.is_featured, is_published: true }
     if (supabase) {
       if (editingProduct && !isUuid(editingProduct)) return notify('تعذر تعديل المنتج: معرّف المنتج غير صالح. حدّث الصفحة ثم حاول مجدداً.', 'error')
       if (!isUuid(productDraft.category_id)) return notify('تعذر حفظ المنتج: اختر قسماً صالحاً من قاعدة البيانات.', 'error')
-      const query = editingProduct
-        ? supabase.from('products').update(payload).eq('id', editingProduct)
-        : supabase.from('products').insert(payload)
-      const { error } = await query
-      if (error) return notify(error.message)
-      const { data } = await supabase.from('products').select('*').order('created_at', { ascending: false })
-      if (data) setProducts(data)
-    } else if (editingProduct) setProducts(prev => prev.map(p => p.id === editingProduct ? { ...p, ...payload } : p))
-    else setProducts(prev => [{ ...payload, id: crypto.randomUUID() }, ...prev])
-    setProductDraft(emptyProduct); setEditingProduct(null); notify('تم حفظ المنتج')
+    }
+    setSavingProduct(true)
+    try {
+      if (supabase) {
+        const query = editingProduct
+          ? supabase.from('products').update(payload).eq('id', editingProduct)
+          : supabase.from('products').insert(payload)
+        const { error } = await query
+        if (error) return notify(saveFailureMessage(error, 'حفظ المنتج'), 'error')
+        const { data, error: reloadError } = await supabase.from('products').select('*').order('created_at', { ascending: false })
+        if (reloadError) return notify(`تم حفظ المنتج، لكن تعذر تحديث القائمة: ${saveFailureMessage(reloadError, 'تحديث قائمة المنتجات')}`, 'error')
+        if (data) setProducts(data)
+      } else if (editingProduct) setProducts(prev => prev.map(p => p.id === editingProduct ? { ...p, ...payload } : p))
+      else setProducts(prev => [{ ...payload, id: crypto.randomUUID() }, ...prev])
+      setProductDraft(emptyProduct); setEditingProduct(null); notify('تم حفظ المنتج')
+    } catch (error) {
+      notify(saveFailureMessage(error, 'حفظ المنتج'), 'error')
+    } finally { setSavingProduct(false) }
   }
   const deleteProduct = async (id) => {
     setConfirmDialog({
@@ -702,9 +882,44 @@ export default function App() {
     </main>}
 
     {page==='admin'&&isAdminEntry&&<main className="content admin-content">{!allowedOwner?<div className="empty-state"><LogIn size={38}/><h2>دخول صاحب المطعم</h2><p>تسجيل الدخول متاح لحساب Google المحدد لهذه النسخة فقط.</p><button className="primary-btn" onClick={login}><LogIn size={17}/> الدخول باستخدام Google</button></div>:<>
-      <div className="section-heading"><div><span className="eyebrow">CONTROL PANEL</span><h2>لوحة إدارة المطعم</h2><p>إدارة قائمتك وإعدادات المطعم من مكان واحد</p></div><button className="outline-btn" onClick={logout}><LogOut size={16}/> تسجيل الخروج</button></div>
-      <div className="admin-tabs"><button className="selected" onClick={()=>document.getElementById('settings-panel')?.scrollIntoView({behavior:'smooth'})}><SlidersHorizontal size={17}/> الإعدادات</button><button onClick={()=>document.getElementById('categories-panel')?.scrollIntoView({behavior:'smooth'})}>الأقسام</button><button onClick={()=>document.getElementById('products-panel')?.scrollIntoView({behavior:'smooth'})}>المنتجات</button><button onClick={()=>document.getElementById('orders-panel')?.scrollIntoView({behavior:'smooth'})}>الطلبات</button><button onClick={()=>document.getElementById('reviews-panel')?.scrollIntoView({behavior:'smooth'})}>التقييمات</button><button onClick={()=>document.getElementById('qr-panel')?.scrollIntoView({behavior:'smooth'})}><QrCode size={16}/> QR</button><button onClick={()=>document.getElementById('analytics-panel')?.scrollIntoView({behavior:'smooth'})}><Eye size={16}/> الإحصائيات</button></div>
-      <section id="analytics-panel" className="admin-panel analytics-panel"><div className="panel-title"><Eye/><div><h3>إحصائيات الزوار</h3><p>آخر 30 يوماً — تُحدّث عند فتح لوحة الإدارة</p></div><button className="outline-btn" onClick={loadAnalytics}>تحديث</button></div>
+      <div className="admin-heading"><div><span className="eyebrow">MENUGO • ADMIN</span><h2>لوحة إدارة المطعم</h2><p>كل ما تحتاجه لإدارة مطعمك من مكان واحد</p></div><button className="outline-btn" onClick={logout}><LogOut size={16}/> تسجيل الخروج</button></div>
+      <div className="admin-workspace">
+        <aside className={`admin-sidebar ${showAdminMore ? 'admin-sidebar-more-open' : ''}`} aria-label="أقسام لوحة الإدارة">
+          <div className="admin-sidebar-caption">القائمة الرئيسية</div>
+          <button className={activeAdminSection==='analytics'?'active':''} onClick={()=>{setActiveAdminSection('analytics');setShowAdminMore(false)}}><Eye size={18}/><span>الرئيسية</span></button>
+          <button className={activeAdminSection==='orders'?'active':''} onClick={()=>{setActiveAdminSection('orders');setShowAdminMore(false)}}><ClipboardList size={18}/><span>الطلبات</span><i>{newOrdersCount||''}</i></button>
+          <button className={activeAdminSection==='products'?'active':''} onClick={()=>{setActiveAdminSection('products');setShowAdminMore(false)}}><UtensilsCrossed size={18}/><span>المنتجات</span></button>
+          <button className={`admin-more-toggle ${showAdminMore || ['categories','qr','settings','reviews','connection'].includes(activeAdminSection)?'active':''}`} aria-expanded={showAdminMore} onClick={()=>setShowAdminMore(value=>!value)}><MoreHorizontal size={19}/><span>المزيد</span></button>
+          <div className="admin-sidebar-extra">
+            <div className="admin-sidebar-caption">إدارة القائمة</div>
+            <button className={activeAdminSection==='categories'?'active':''} onClick={()=>{setActiveAdminSection('categories');setShowAdminMore(false)}}><Tags size={18}/><span>الأقسام</span></button>
+            <button className={activeAdminSection==='qr'?'active':''} onClick={()=>{setActiveAdminSection('qr');setShowAdminMore(false)}}><QrCode size={18}/><span>الطاولات و QR</span></button>
+            <div className="admin-sidebar-caption">إعدادات وتقارير</div>
+            <button className={activeAdminSection==='settings'?'active':''} onClick={()=>{setActiveAdminSection('settings');setShowAdminMore(false)}}><SlidersHorizontal size={18}/><span>إعدادات المطعم</span></button>
+            <button className={activeAdminSection==='reviews'?'active':''} onClick={()=>{setActiveAdminSection('reviews');setShowAdminMore(false)}}><Star size={18}/><span>التقييمات</span></button>
+            <button className={activeAdminSection==='connection'?'active':''} onClick={()=>{setActiveAdminSection('connection');setShowAdminMore(false)}}><MapPinned size={18}/><span>معلومات الربط</span></button>
+          </div>
+        </aside>
+        <div className="admin-main">
+      <section id="analytics-panel" className={`admin-panel analytics-panel ${activeAdminSection==='analytics'?'admin-panel-active':'admin-panel-hidden'}`}>
+        <div className="admin-welcome"><div><span className="eyebrow">لوحة المطعم</span><h3>أهلاً بك في {arabicValue(settings.restaurant_name) || 'MenuGo'}</h3><p>هذا ملخص نشاط مطعمك اليوم، ويمكنك الوصول إلى أهم المهام مباشرة.</p></div><span className="admin-date">{new Date().toLocaleDateString('ar', { weekday: 'long', day: 'numeric', month: 'long' })}</span></div>
+        <div className="admin-overview-cards admin-overview-cards-live">
+          <button onClick={()=>setActiveAdminSection('orders')}><span>طلبات اليوم</span><strong>{orderStatsReady ? todayOrdersCount : '—'}</strong><small>فتح إدارة الطلبات <ChevronDown size={13}/></small></button>
+          <button onClick={()=>setActiveAdminSection('orders')}><span>مبيعات اليوم</span><strong>{orderStatsReady ? money(todayRevenue,settings.currency) : '—'}</strong><small>باستثناء الطلبات الملغاة <ChevronDown size={13}/></small></button>
+          <button onClick={()=>setActiveAdminSection('orders')}><span>طلبات جديدة</span><strong>{orderStatsReady ? newOrdersCount : '—'}</strong><small>تحتاج إلى متابعة <ChevronDown size={13}/></small></button>
+          <button onClick={()=>setActiveAdminSection('products')}><span>منتجات متاحة</span><strong>{availableProductsCount}</strong><small>من أصل {products.length} منتج <ChevronDown size={13}/></small></button>
+        </div>
+        <div className="admin-quick-actions">
+          <button onClick={()=>setActiveAdminSection('products')}><Plus size={17}/><span>إضافة منتج</span></button>
+          <button onClick={()=>setActiveAdminSection('categories')}><Tags size={17}/><span>إدارة الأقسام</span></button>
+          <button onClick={()=>setActiveAdminSection('qr')}><QrCode size={17}/><span>رموز الطاولات</span></button>
+          <button onClick={()=>setActiveAdminSection('settings')}><SlidersHorizontal size={17}/><span>إعدادات المطعم</span></button>
+        </div>
+        <div className="admin-recent-orders">
+          <div className="panel-title"><ClipboardList/><div><h3>أحدث الطلبات</h3><p>آخر الطلبات المسجلة في النظام</p></div><button className="outline-btn" onClick={()=>setActiveAdminSection('orders')}>عرض الكل</button></div>
+          {orders.length ? orders.slice(0,5).map(order=><button className="admin-recent-order" key={order.id} onClick={()=>setActiveAdminSection('orders')}><span className="admin-recent-order-main"><b>طلب #{order.order_number || order.id.slice(0,8)}</b><small>{new Date(order.created_at).toLocaleString('ar', { dateStyle: 'short', timeStyle: 'short' })}{order.table_name ? ` · ${order.table_name}` : ''}</small></span><strong>{money(order.total,settings.currency)}</strong><em className={`order-status status-${order.status || 'unknown'}`}>{orderStatusLabel(order.status)}</em></button>) : <p className="muted admin-no-orders">لا توجد طلبات مسجلة حتى الآن. ستظهر الطلبات الجديدة هنا تلقائياً.</p>}
+        </div>
+        <div className="panel-title admin-analytics-heading"><Eye/><div><h3>إحصائيات الزوار</h3><p>آخر 30 يوماً — تُحدّث عند فتح لوحة الإدارة</p></div><button className="outline-btn" onClick={loadAnalytics}>تحديث</button></div>
         {analyticsLoading?<p className="muted">جارٍ تحميل الإحصائيات...</p>:analytics?<>
           <div className="analytics-cards">
             <div className="analytics-card"><small>الزوار الفريدون</small><strong>{analytics.visitors}</strong></div>
@@ -719,40 +934,41 @@ export default function App() {
           <p className="muted analytics-note">يُحتسب الزائر الفريد بواسطة معرّف عشوائي محفوظ على جهازه، ولا نسجل الاسم أو البريد أو عنوان IP. قد يتغير العدد إذا حذف الزائر بيانات المتصفح أو استخدم جهازاً آخر.</p>
         </>:<p className="muted">لا توجد بيانات بعد. ستظهر الإحصائيات بعد بدء استقبال الزيارات.</p>}
       </section>
-      <section id="settings-panel" className="admin-panel"><div className="panel-title"><SlidersHorizontal/><div><h3>إعدادات المطعم والتواصل</h3><p>هذه الإعدادات تخص نسخة هذا المطعم فقط.</p></div></div>
-        <div className="form-grid"><label>اسم المطعم<input value={settings.restaurant_name} onChange={e=>updateSetting('restaurant_name',e.target.value)}/></label><label>عبارة ترحيبية<input value={settings.tagline||''} onChange={e=>updateSetting('tagline',e.target.value)}/></label><label>العملة<select value={settings.currency||'EUR'} onChange={e=>updateSetting('currency',e.target.value)}><option value="EUR">يورو EUR</option><option value="USD">دولار USD</option><option value="TRY">ليرة تركية TRY</option><option value="SAR">ريال سعودي SAR</option><option value="SYP">ليرة سورية SYP</option></select></label><label>لون الهوية<input type="color" value={settings.primary_color||'#1d4738'} onChange={e=>updateSetting('primary_color',e.target.value)}/></label></div>
-        <div className="form-grid"><label>شعار المطعم<input type="file" accept="image/png,image/jpeg,image/webp" onChange={e=>uploadImage(e.target.files?.[0],url=>updateSetting('logo_url',url))}/>{settings.logo_url&&<img className="admin-image-preview" src={settings.logo_url} alt="شعار المطعم"/>}</label><label>صورة الغلاف<input type="file" accept="image/png,image/jpeg,image/webp" onChange={e=>uploadImage(e.target.files?.[0],url=>updateSetting('cover_url',url))}/>{settings.cover_url&&<img className="admin-image-preview" src={settings.cover_url} alt="غلاف المطعم"/>}</label></div>
-        <div className="setting-row"><div><b>الطلب عبر واتساب</b><small>إظهار أو إخفاء زر الطلب عبر واتساب للزبائن</small></div><input type="checkbox" checked={!!settings.whatsapp_enabled} onChange={e=>updateSetting('whatsapp_enabled',e.target.checked)}/></div>
-        {settings.whatsapp_enabled&&<label className="single-field">رقم واتساب مع رمز الدولة<input value={settings.whatsapp_number||''} onChange={e=>updateSetting('whatsapp_number',e.target.value)} placeholder="مثال: 33612345678"/></label>}
-        <div className="setting-row"><div><b>استقبال الطلبات داخل النظام</b><small>حفظ الطلبات في قاعدة البيانات لمتابعة حالتها</small></div><input type="checkbox" checked={!!settings.internal_orders_enabled} onChange={e=>updateSetting('internal_orders_enabled',e.target.checked)}/></div>
-        <div className="setting-row"><div><b>التنبيه الصوتي للطلبات الجديدة</b><small>تشغيل صوت عند وصول طلب جديد إلى لوحة الإدارة</small></div><input type="checkbox" checked={!!settings.order_sound_enabled} onChange={e=>{updateSetting('order_sound_enabled',e.target.checked);if(e.target.checked)playNewOrderSound()}}/></div>
-        <div className="setting-row"><div><b>إدارة حالات الطلبات</b><small>إظهار أو إخفاء خيارات تغيير حالة الطلب</small></div><input type="checkbox" checked={settings.order_status_enabled!==false} onChange={e=>updateSetting('order_status_enabled',e.target.checked)}/></div>
-        <div className="social-setting"><div className="social-heading"><Facebook/><b>فيسبوك</b><input type="checkbox" checked={!!settings.facebook_enabled} onChange={e=>updateSetting('facebook_enabled',e.target.checked)}/></div>{settings.facebook_enabled&&<input value={settings.facebook_url||''} onChange={e=>updateSetting('facebook_url',e.target.value)} placeholder="رابط صفحة فيسبوك"/>}</div>
-        <div className="social-setting"><div className="social-heading"><Instagram/><b>إنستغرام</b><input type="checkbox" checked={!!settings.instagram_enabled} onChange={e=>updateSetting('instagram_enabled',e.target.checked)}/></div>{settings.instagram_enabled&&<input value={settings.instagram_url||''} onChange={e=>updateSetting('instagram_url',e.target.value)} placeholder="رابط حساب إنستغرام"/>}</div>
-        <div className="social-setting location-setting"><div className="social-heading"><MapPinned/><b>موقع المطعم على الخريطة</b></div><label className="single-field">وصف الموقع (للمدير فقط)<input value={settings.restaurant_address||''} onChange={e=>updateSetting('restaurant_address',e.target.value)} placeholder="وصف يساعدك على تذكر الموقع"/></label><label className="single-field">رابط موقع المطعم على خرائط Google<input type="url" value={settings.restaurant_location_url||''} onChange={e=>updateSetting('restaurant_location_url',e.target.value)} placeholder="https://maps.app.goo.gl/..."/></label><div className="location-coordinates"><label className="single-field">خط العرض<input type="number" step="any" value={settings.restaurant_latitude??''} onChange={e=>{updateSetting('restaurant_latitude',e.target.value);setDistanceInfo(null)}} placeholder="مثال: 33.5138"/></label><label className="single-field">خط الطول<input type="number" step="any" value={settings.restaurant_longitude??''} onChange={e=>{updateSetting('restaurant_longitude',e.target.value);setDistanceInfo(null)}} placeholder="مثال: 36.2765"/></label></div><small className="muted">للدقة: افتح موقع المطعم في خرائط Google، واضغط مطولاً على النقطة الصحيحة، ثم انسخ الإحداثيين الظاهرين وأدخلهما هنا. إذا كان رابط الخريطة يحتوي على إحداثيات فسيتم التقاطها تلقائياً؛ أما الرابط المختصر فقد يحتاج إدخال الإحداثيين يدوياً. الوصف لا يظهر للزوار. الإحداثيات تحدد دبوس المطعم وتحسب مسافة الطريق بالسيارة.</small></div>
-        <button className="primary-btn" onClick={saveSettings}><Save size={17}/> حفظ الإعدادات</button>
+      <section id="settings-panel" className={`admin-panel ${activeAdminSection==='settings'?'admin-panel-active':'admin-panel-hidden'}`}>
+        <div className="panel-title"><SlidersHorizontal/><div><h3>إعدادات المطعم</h3><p>إعدادات منظمة حسب نوع الخدمة، مع حفظ جميع التغييرات من زر واحد.</p></div></div>
+        <div className="settings-tabs" role="tablist" aria-label="تصنيفات الإعدادات">
+          {[['restaurant','معلومات المطعم'],['contact','التواصل'],['alerts','التنبيهات'],['location','الموقع'],['system','النظام']].map(([key,label])=><button type="button" role="tab" aria-selected={settingsTab===key} className={settingsTab===key?'active':''} onClick={()=>setSettingsTab(key)} key={key}>{label}</button>)}
+        </div>
+        {settingsTab==='restaurant'&&<div className="settings-group"><h4>معلومات المطعم والهوية</h4><div className="form-grid"><label>اسم المطعم<input value={settings.restaurant_name} onChange={e=>updateSetting('restaurant_name',e.target.value)}/></label><label>عبارة ترحيبية<input value={settings.tagline||''} onChange={e=>updateSetting('tagline',e.target.value)}/></label><label>العملة<select value={settings.currency||'EUR'} onChange={e=>updateSetting('currency',e.target.value)}><option value="EUR">يورو EUR</option><option value="USD">دولار USD</option><option value="TRY">ليرة تركية TRY</option><option value="SAR">ريال سعودي SAR</option><option value="SYP">ليرة سورية SYP</option></select></label><label>لون الهوية<input type="color" value={settings.primary_color||'#1d4738'} onChange={e=>updateSetting('primary_color',e.target.value)}/></label></div><div className="form-grid settings-media-grid"><label>شعار المطعم<input type="file" accept="image/png,image/jpeg,image/webp" disabled={uploading} onChange={e=>uploadImage(e.target.files?.[0],url=>updateSetting('logo_url',url))}/>{settings.logo_url&&<img className="admin-image-preview" src={settings.logo_url} alt="شعار المطعم"/>}</label><label>صورة الغلاف<input type="file" accept="image/png,image/jpeg,image/webp" disabled={uploading} onChange={e=>uploadImage(e.target.files?.[0],url=>updateSetting('cover_url',url))}/>{settings.cover_url&&<img className="admin-image-preview" src={settings.cover_url} alt="غلاف المطعم"/>}</label></div></div>}
+        {settingsTab==='contact'&&<div className="settings-group"><h4>التواصل والروابط الاجتماعية</h4><div className="setting-row"><div><b>الطلب عبر واتساب</b><small>إظهار أو إخفاء زر الطلب عبر واتساب للزبائن</small></div><input type="checkbox" checked={!!settings.whatsapp_enabled} onChange={e=>updateSetting('whatsapp_enabled',e.target.checked)}/></div>{settings.whatsapp_enabled&&<label className="single-field">رقم واتساب مع رمز الدولة<input value={settings.whatsapp_number||''} onChange={e=>updateSetting('whatsapp_number',e.target.value)} placeholder="مثال: 33612345678"/></label>}<div className="social-setting"><div className="social-heading"><Facebook/><b>فيسبوك</b><input type="checkbox" checked={!!settings.facebook_enabled} onChange={e=>updateSetting('facebook_enabled',e.target.checked)}/></div>{settings.facebook_enabled&&<input value={settings.facebook_url||''} onChange={e=>updateSetting('facebook_url',e.target.value)} placeholder="رابط صفحة فيسبوك"/>}</div><div className="social-setting"><div className="social-heading"><Instagram/><b>إنستغرام</b><input type="checkbox" checked={!!settings.instagram_enabled} onChange={e=>updateSetting('instagram_enabled',e.target.checked)}/></div>{settings.instagram_enabled&&<input value={settings.instagram_url||''} onChange={e=>updateSetting('instagram_url',e.target.value)} placeholder="رابط حساب إنستغرام"/>}</div></div>}
+        {settingsTab==='alerts'&&<div className="settings-group"><h4>التنبيهات وإدارة الطلبات</h4><div className="setting-row"><div><b>التنبيه الصوتي للطلبات الجديدة</b><small>تشغيل صوت عند وصول طلب جديد إلى لوحة الإدارة</small></div><input type="checkbox" checked={!!settings.order_sound_enabled} onChange={e=>{updateSetting('order_sound_enabled',e.target.checked);if(e.target.checked)playNewOrderSound()}}/></div><div className="setting-row"><div><b>إدارة حالات الطلبات</b><small>إظهار أو إخفاء خيارات تغيير حالة الطلب</small></div><input type="checkbox" checked={settings.order_status_enabled!==false} onChange={e=>updateSetting('order_status_enabled',e.target.checked)}/></div></div>}
+        {settingsTab==='location'&&<div className="settings-group"><h4>موقع المطعم على الخريطة</h4><label className="single-field">وصف الموقع (للمدير فقط)<input value={settings.restaurant_address||''} onChange={e=>updateSetting('restaurant_address',e.target.value)} placeholder="وصف يساعدك على تذكر الموقع"/></label><label className="single-field">رابط موقع المطعم على خرائط Google<input type="url" value={settings.restaurant_location_url||''} onChange={e=>updateSetting('restaurant_location_url',e.target.value)} placeholder="https://maps.app.goo.gl/..."/></label><div className="location-coordinates"><label className="single-field">خط العرض<input type="number" step="any" value={settings.restaurant_latitude??''} onChange={e=>{updateSetting('restaurant_latitude',e.target.value);setDistanceInfo(null)}} placeholder="مثال: 33.5138"/></label><label className="single-field">خط الطول<input type="number" step="any" value={settings.restaurant_longitude??''} onChange={e=>{updateSetting('restaurant_longitude',e.target.value);setDistanceInfo(null)}} placeholder="مثال: 36.2765"/></label></div><small className="muted">أدخل إحداثيات المطعم أو رابط خرائط Google. الإحداثيات تحدد دبوس المطعم وتُستخدم لحساب مسافة الطريق.</small></div>}
+        {settingsTab==='system'&&<div className="settings-group"><h4>إعدادات النظام واستقبال الطلبات</h4><div className="setting-row"><div><b>استقبال الطلبات داخل النظام</b><small>حفظ الطلبات في قاعدة البيانات لمتابعة حالتها</small></div><input type="checkbox" checked={!!settings.internal_orders_enabled} onChange={e=>updateSetting('internal_orders_enabled',e.target.checked)}/></div><p className="muted">يتم تطبيق هذه الخيارات على واجهة المطعم وعمليات استقبال الطلبات.</p></div>}
+        <div className="settings-save-row"><span>تذكّر حفظ التغييرات قبل مغادرة الصفحة.</span><button className="primary-btn" disabled={savingSettings} aria-busy={savingSettings} onClick={saveSettings}><Save size={17}/> {savingSettings?'جارٍ الحفظ...':'حفظ الإعدادات'}</button></div>
       </section>
-      <section id="categories-panel" className="admin-panel"><div className="panel-title"><Tags/><div><h3>إدارة الأقسام</h3><p>أضف أقساماً غير محددة العدد ورتبها حسب قائمتك.</p></div></div><div className="inline-form"><input value={categoryDraftAr} onChange={e=>setCategoryDraftAr(e.target.value)} placeholder="اسم القسم بالعربية"/><button className="primary-btn" onClick={saveCategory}>{editingCategory?'تحديث القسم':'إضافة قسم'}</button>{editingCategory&&<button className="outline-btn" onClick={()=>{setEditingCategory(null);setCategoryDraftAr('')}}>إلغاء</button>}</div>
+      <section id="categories-panel" className={`admin-panel ${activeAdminSection==='categories'?'admin-panel-active':'admin-panel-hidden'}`}><div className="panel-title"><Tags/><div><h3>إدارة الأقسام</h3><p>أضف أقساماً غير محددة العدد ورتبها حسب قائمتك.</p></div></div><div className="inline-form"><input value={categoryDraftAr} onChange={e=>setCategoryDraftAr(e.target.value)} placeholder="اسم القسم بالعربية"/><button className="primary-btn" disabled={savingCategory} aria-busy={savingCategory} onClick={saveCategory}>{savingCategory?'جارٍ الحفظ...':editingCategory?'تحديث القسم':'إضافة قسم'}</button>{editingCategory&&<button className="outline-btn" onClick={()=>{setEditingCategory(null);setCategoryDraftAr('')}}>إلغاء</button>}</div>
         {categories.map(c=><div className="manage-row" key={c.id}><span>{categoryLabel(c)}</span><button className="tiny-btn" onClick={()=>{setEditingCategory(c.id);setCategoryDraftAr(categoryLabel(c));}}>تعديل</button><button className="tiny-btn icon-action" onClick={()=>moveCategory(c.id,-1)} title="تحريك لأعلى" aria-label="تحريك لأعلى"><ArrowUp size={16}/></button><button className="tiny-btn icon-action" onClick={()=>moveCategory(c.id,1)} title="تحريك لأسفل" aria-label="تحريك لأسفل"><ArrowDown size={16}/></button><button className="tiny-btn danger" onClick={()=>deleteCategory(c.id)}>حذف</button><button className="tiny-btn" onClick={async()=>{const v=!c.is_visible;if(supabase){const {error}=await supabase.from('categories').update({is_visible:v}).eq('id',c.id);if(error)return notify(error.message)}setCategories(prev=>prev.map(x=>x.id===c.id?{...x,is_visible:v}:x))}}>{c.is_visible===false?<EyeOff size={15}/>:<Eye size={15}/>}</button></div>)}
       </section>
-      <section id="products-panel" className="admin-panel"><div className="panel-title"><UtensilsCrossed/><div><h3>إدارة المنتجات</h3><p>إضافة المنتجات وتعديل الأسعار والتوفر والصور.</p></div></div>
-        <div className="form-grid"><label>اسم المنتج بالعربية<input value={productDraft.name_ar} onChange={e=>setProductDraft({...productDraft,name_ar:e.target.value})}/></label><label>السعر<input type="number" min="0" step="0.01" value={productDraft.price} onChange={e=>setProductDraft({...productDraft,price:e.target.value})}/></label><label>القسم<select value={productDraft.category_id} onChange={e=>setProductDraft({...productDraft,category_id:e.target.value})}><option value="">اختر القسم</option>{categories.map(c=><option key={c.id} value={c.id}>{categoryLabel(c)}</option>)}</select></label><label>صورة المنتج<input type="file" accept="image/png,image/jpeg,image/webp" onChange={e=>uploadImage(e.target.files?.[0],url=>setProductDraft(prev=>({...prev,image_url:url})))}/>{productDraft.image_url&&<img className="admin-image-preview" src={productDraft.image_url} alt="معاينة"/>}{uploading&&<small>جارٍ رفع الصورة...</small>}</label><label>الوصف بالعربية<textarea value={productDraft.description_ar} onChange={e=>setProductDraft({...productDraft,description_ar:e.target.value})}/></label></div>
+      <section id="products-panel" className={`admin-panel ${activeAdminSection==='products'?'admin-panel-active':'admin-panel-hidden'}`}><div className="panel-title"><UtensilsCrossed/><div><h3>إدارة المنتجات</h3><p>إضافة المنتجات وتعديل الأسعار والتوفر والصور.</p></div></div>
+        <div className="form-grid"><label>اسم المنتج بالعربية<input value={productDraft.name_ar} onChange={e=>setProductDraft({...productDraft,name_ar:e.target.value})}/></label><label>السعر<input type="number" min="0" step="0.01" value={productDraft.price} onChange={e=>setProductDraft({...productDraft,price:e.target.value})}/></label><label>القسم<select value={productDraft.category_id} onChange={e=>setProductDraft({...productDraft,category_id:e.target.value})}><option value="">اختر القسم</option>{categories.map(c=><option key={c.id} value={c.id}>{categoryLabel(c)}</option>)}</select></label><label>صورة المنتج<input type="file" accept="image/png,image/jpeg,image/webp" disabled={uploading} onChange={e=>uploadImage(e.target.files?.[0],url=>setProductDraft(prev=>({...prev,image_url:url})))}/>{productDraft.image_url&&<img className="admin-image-preview" src={productDraft.image_url} alt="معاينة"/>}{uploading&&<small>جارٍ رفع الصورة...</small>}</label><label>الوصف بالعربية<textarea value={productDraft.description_ar} onChange={e=>setProductDraft({...productDraft,description_ar:e.target.value})}/></label></div>
         <div className="check-line"><label><input type="checkbox" checked={!!productDraft.is_available} onChange={e=>setProductDraft({...productDraft,is_available:e.target.checked})}/> متوفر</label><label><input type="checkbox" checked={!!productDraft.is_featured} onChange={e=>setProductDraft({...productDraft,is_featured:e.target.checked})}/> منتج مميز</label></div>
-        <button className="primary-btn" onClick={saveProduct}>{editingProduct?'تحديث المنتج':'إضافة المنتج'}</button>
-        {products.map(p=><div className="manage-row" key={p.id}><span><b>{localized(p, 'name')}</b><small>{money(p.price,settings.currency)}</small></span><button className="tiny-btn" onClick={()=>{setEditingProduct(p.id);setProductDraft({...emptyProduct,...p,name_ar:p.name_ar||p.name,description_ar:p.description_ar||p.description,price:String(p.price)})}}>تعديل</button><button className="tiny-btn" onClick={async()=>{const v=p.is_published===false;const {error}=await supabase.from('products').update({is_published:v}).eq('id',p.id);if(error)return notify(error.message);setProducts(prev=>prev.map(x=>x.id===p.id?{...x,is_published:v}:x))}}>{p.is_published===false?<EyeOff size={15}/>:<Eye size={15}/>}</button><button className="tiny-btn danger" onClick={()=>deleteProduct(p.id)}>حذف</button></div>)}
+        <button className="primary-btn" disabled={savingProduct} aria-busy={savingProduct} onClick={saveProduct}>{savingProduct?'جارٍ الحفظ...':editingProduct?'تحديث المنتج':'إضافة المنتج'}</button>
+        <div className="product-admin-list">{products.map(p=><article className="product-admin-card" key={p.id}><div className="product-admin-thumb">{p.image_url?<img src={p.image_url} alt={localized(p,'name')}/>:<UtensilsCrossed size={22}/>}</div><div className="product-admin-details"><b>{localized(p, 'name')}</b><strong>{money(p.price,settings.currency)}</strong><span className={p.is_available===false?'product-availability unavailable':'product-availability'}>{p.is_available===false?'غير متوفر':'متوفر'}</span></div><div className="product-admin-actions"><button className="tiny-btn" onClick={()=>{setEditingProduct(p.id);setProductDraft({...emptyProduct,...p,name_ar:p.name_ar||p.name,description_ar:p.description_ar||p.description,price:String(p.price)})}}>تعديل</button><button className="tiny-btn" disabled={!!updatingProductPublishId||!!updatingProductId} aria-busy={updatingProductPublishId===p.id} title={p.is_published===false?'إظهار المنتج':'إخفاء المنتج'} onClick={()=>toggleProductPublished(p)}>{updatingProductPublishId===p.id?'...':p.is_published===false?<EyeOff size={15}/>:<Eye size={15}/>}</button><button className="tiny-btn danger" onClick={()=>deleteProduct(p.id)}>حذف</button><button className={`availability-toggle ${p.is_available===false?'is-off':''}`} disabled={!!updatingProductId||!!updatingProductPublishId} onClick={()=>toggleProductAvailability(p)}>{updatingProductId===p.id?'...':p.is_available===false?'تفعيل التوفر':'إيقاف التوفر'}</button></div></article>)}</div>
       </section>
-      <section id="orders-panel" className="admin-panel"><div className="panel-title"><ClipboardList/><div><h3>إدارة الطلبات</h3><p>متابعة الطلبات الداخلية وتحديث حالتها</p></div><button className="outline-btn" onClick={loadOrders}>تحديث</button></div>
-        {orders.length ? orders.map(order=><article className="order-card" key={order.id}><div className="manage-row"><b>طلب #{order.order_number || order.id.slice(0,8)}{order.table_name ? ` · ${order.table_name}` : ''}</b><small>{new Date(order.created_at).toLocaleString('ar')}</small></div><p>{(order.items||[]).map(i=>`${arabicValue(i.name) || 'منتج'} × ${i.quantity} (${money(i.price*i.quantity,settings.currency)})`).join('، ')}</p><p><b>الإجمالي:</b> {money(order.total,settings.currency)} {order.notes&&<> · {order.notes}</>}</p>{settings.order_status_enabled!==false&&<label>حالة الطلب<select value={order.status} onChange={e=>changeOrderStatus(order.id,e.target.value)}>{[['new','جديد'],['preparing','قيد التحضير'],['ready','جاهز'],['completed','مكتمل'],['cancelled','ملغي']].map(([v,l])=><option value={v} key={v}>{l}</option>)}</select></label>}</article>) : <p className="muted">لا توجد طلبات داخلية حتى الآن.</p>}
+      <section id="orders-panel" className={`admin-panel ${activeAdminSection==='orders'?'admin-panel-active':'admin-panel-hidden'}`}><div className="panel-title"><ClipboardList/><div><h3>إدارة الطلبات</h3><p>طلباتك مرتبة حسب الحالة، مع تحديث سريع من البطاقة مباشرة.</p></div><button className="outline-btn" onClick={loadOrders}>تحديث</button></div>
+        {orders.length ? <div className="orders-status-groups">{[['new','جديدة'],['preparing','قيد التحضير'],['ready','جاهزة'],['completed','مكتملة'],['cancelled','ملغاة']].map(([status,label])=>{const group=orders.filter(order=>(order.status||'new')===status);return <section className={`orders-status-group group-${status}`} key={status}><header><span className={`order-status status-${status}`}>{label}</span><b>{group.length}</b></header>{group.length?group.map(order=><article className="order-card order-management-card" key={order.id}><div className="order-card-heading"><div><b>طلب #{order.order_number || String(order.id).slice(0,8)}{order.table_name ? ` · ${order.table_name}` : ''}</b><small>{new Date(order.created_at).toLocaleString('ar')}</small></div><strong>{money(order.total,settings.currency)}</strong></div><div className="order-items-list">{(order.items||[]).map((item,index)=><span key={`${order.id}-${index}`}>{arabicValue(item.name)||'منتج'} <b>× {item.quantity}</b></span>)}</div>{order.notes&&<p className="order-customer-note">ملاحظة: {order.notes}</p>}{settings.order_status_enabled!==false&&<div className="order-quick-actions">{status==='new'&&<button disabled={updatingOrderId===order.id} onClick={()=>changeOrderStatus(order.id,'preparing')}>قبول وبدء التحضير</button>}{status==='preparing'&&<button disabled={updatingOrderId===order.id} onClick={()=>changeOrderStatus(order.id,'ready')}>تحديد كجاهز</button>}{status==='ready'&&<button disabled={updatingOrderId===order.id} onClick={()=>changeOrderStatus(order.id,'completed')}>إكمال الطلب</button>}{!['completed','cancelled'].includes(status)&&<button className="order-cancel-action" disabled={updatingOrderId===order.id} onClick={()=>setConfirmDialog({title:'تأكيد إلغاء الطلب',message:`هل أنت متأكد من إلغاء الطلب #${order.order_number || String(order.id).slice(0,8)}؟ لن يُلغى الطلب إلا بعد تأكيدك.`,confirmLabel:'نعم، ألغِ الطلب',onConfirm:()=>changeOrderStatus(order.id,'cancelled')})}>إلغاء الطلب</button>}{updatingOrderId===order.id&&<small>جارٍ تحديث الحالة...</small>}</div>}</article>):<p className="orders-group-empty">لا توجد طلبات {label.toLowerCase()} حالياً.</p>}</section>})}</div> : <p className="muted">لا توجد طلبات داخلية حتى الآن.</p>}
       </section>
-      <section id="reviews-panel" className="admin-panel"><div className="panel-title"><Star/><div><h3>تقييمات المنتجات (خاصة بالمدير)</h3><p>لا تظهر التقييمات أو متوسطاتها للزوار</p></div><button className="outline-btn" onClick={loadReviews}>تحديث</button></div>
+      <section id="reviews-panel" className={`admin-panel ${activeAdminSection==='reviews'?'admin-panel-active':'admin-panel-hidden'}`}><div className="panel-title"><Star/><div><h3>تقييمات المنتجات (خاصة بالمدير)</h3><p>لا تظهر التقييمات أو متوسطاتها للزوار</p></div><button className="outline-btn" onClick={loadReviews}>تحديث</button></div>
         {reviews.map(r=><article className="order-card" key={r.product_id}><h4>{localized(products.find(p=>p.id===r.product_id), 'name') || 'منتج'}</h4><b>★ {r.average_rating} / 5 · {r.review_count} تقييم</b>{(r.reviews||[]).map(item=><p key={item.id}>{'★'.repeat(item.rating)} {item.comment || 'دون تعليق'} <small>{new Date(item.created_at).toLocaleString('ar')}</small></p>)}</article>)}
         {!reviews.length&&<p className="muted">لا توجد تقييمات بعد.</p>}
       </section>
-      <section id="qr-panel" className="admin-panel"><div className="panel-title"><QrCode/><div><h3>إدارة رموز QR والطاولات</h3><p>الرموز محفوظة في قاعدة البيانات وتبقى ثابتة بعد إغلاق الموقع أو تسجيل الخروج.</p></div><button className="outline-btn" onClick={loadRestaurantTables}>تحديث</button></div>
+      <section id="qr-panel" className={`admin-panel ${activeAdminSection==='qr'?'admin-panel-active':'admin-panel-hidden'}`}><div className="panel-title"><QrCode/><div><h3>إدارة رموز QR والطاولات</h3><p>الرموز محفوظة في قاعدة البيانات وتبقى ثابتة بعد إغلاق الموقع أو تسجيل الخروج.</p></div><button className="outline-btn" onClick={loadRestaurantTables}>تحديث</button></div>
         <div className="table-create-row"><input value={tableDraft} onChange={e=>setTableDraft(e.target.value)} placeholder="اسم الطاولة، مثل: طاولة 1"/><button className="primary-btn" onClick={addRestaurantTable}>إضافة طاولة</button></div>
         {tableLoading?<p className="muted">جارٍ تحميل الطاولات...</p>:<div className="restaurant-table-grid">{restaurantTables.map(table=><article className="restaurant-table-card" key={table.id}><h4>{table.is_general?'رمز القائمة العام':table.table_name}</h4><img src={tableQrImages[table.id]||''} alt={`رمز QR ${table.table_name}`}/><small>{table.is_general?'يفتح القائمة دون تحديد طاولة':'يفتح القائمة مع تحديد الطاولة تلقائياً'}</small><div className="table-qr-actions"><a className="outline-btn" href={tableQrImages[table.id]} download="menugo-qr.png">تنزيل</a><button className="outline-btn" onClick={()=>printTableQr(table)}>طباعة</button>{!table.is_general&&<button className="tiny-btn danger" onClick={()=>setConfirmDialog({title:'حذف الطاولة',message:`هل تريد حذف ${table.table_name}؟ سيتوقف رمزها عن العمل.`,onConfirm:()=>deleteRestaurantTable(table)})}>حذف</button>}</div></article>)}</div>}
       </section>
-      <section className="admin-panel"><h3>معلومات الربط</h3><p className="muted">{isSupabaseConfigured?'تم العثور على إعدادات Supabase في البيئة.':'لم يتم ضبط Supabase بعد؛ الواجهة تعمل ببيانات تجريبية محلية.'}</p></section>
+      <section className={`admin-panel ${activeAdminSection==='connection'?'admin-panel-active':'admin-panel-hidden'}`}><h3>معلومات الربط</h3><p className="muted">{isSupabaseConfigured?'تم العثور على إعدادات Supabase في البيئة.':'لم يتم ضبط Supabase بعد؛ الواجهة تعمل ببيانات تجريبية محلية.'}</p></section>
+        </div>
+      </div>
     </>}</main>}
 
     {reviewDraft.product&&<div className="review-backdrop"><section className="review-dialog"><button className="remove-btn" onClick={()=>setReviewDraft({product:null,rating:5,comment:''})}><X/></button><h3>تقييم المنتج: {localized(reviewDraft.product,'name')}</h3><label>التقييم بالنجوم<select value={reviewDraft.rating} onChange={e=>setReviewDraft({...reviewDraft,rating:e.target.value})}>{[5,4,3,2,1].map(n=><option key={n} value={n}>{'★'.repeat(n)} ({n})</option>)}</select></label><label>تعليق اختياري<textarea maxLength={1000} value={reviewDraft.comment} onChange={e=>setReviewDraft({...reviewDraft,comment:e.target.value})}/></label><button className="primary-btn" onClick={submitReview}>إرسال التقييم</button></section></div>}
@@ -768,7 +984,7 @@ export default function App() {
         <p id="confirm-message">{confirmDialog.message}</p>
         <div className="confirm-actions">
           <button className="outline-btn" disabled={confirmBusy} onClick={()=>{setConfirmDialog(null);setConfirmBusy(false)}}>إلغاء</button>
-          <button className="confirm-danger" disabled={confirmBusy} aria-busy={confirmBusy} onClick={async()=>{if(confirmBusy)return;setConfirmBusy(true);try{const result=await confirmDialog.onConfirm();if(result!==false)setConfirmDialog(null)}catch(error){notify(`تعذر تنفيذ العملية: ${error?.message || 'حدث خطأ غير متوقع'}`,'error')}finally{setConfirmBusy(false)}}}>{confirmBusy?'جارٍ التنفيذ...':(confirmDialog.confirmLabel || 'تأكيد الحذف')}</button>
+          <button className="confirm-danger" disabled={confirmBusy} aria-busy={confirmBusy} onClick={async()=>{if(confirmBusy)return;setConfirmBusy(true);try{const result=await confirmDialog.onConfirm();if(result!==false)setConfirmDialog(null)}catch(error){notify(saveFailureMessage(error, 'تنفيذ العملية'), 'error')}finally{setConfirmBusy(false)}}}>{confirmBusy?'جارٍ التنفيذ...':(confirmDialog.confirmLabel || 'تأكيد الحذف')}</button>
         </div>
       </section>
     </div>}
