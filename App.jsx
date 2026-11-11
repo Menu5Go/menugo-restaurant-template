@@ -873,6 +873,13 @@ export default function App() {
     </header>
 
     {page==='menu' && <>
+      <section className="customer-location-strip" aria-label="موقع المطعم والمسافة">
+        <div className="customer-location-actions">
+          {restaurantMapUrl(settings)&&<a className="customer-map-link" href={restaurantMapUrl(settings)} target="_blank" rel="noreferrer"><MapPinned size={17}/> موقع المطعم</a>}
+          <button className="customer-distance-btn" type="button" onClick={calculateRestaurantDistance} disabled={distanceLoading}>{distanceLoading?'جارٍ الحساب...':'احسب المسافة'}</button>
+        </div>
+        {distanceInfo&&<small className={`customer-distance-result ${distanceInfo.kind}`} aria-live="polite">{distanceInfo.text}</small>}
+      </section>
       <section className="hero">
         <div className="hero-copy"><span className="eyebrow">قائمة طعام • طازجة • شهية</span>{activeRestaurantTable&&<span className="table-order-badge">الطلب للطاولة: {activeRestaurantTable.table_name}</span>}<h1>{arabicValue(settings.tagline) || 'نكهات تستحق التجربة'}</h1><p>تصفح قائمتنا واختر ما يناسب ذوقك.</p><button className="primary-btn" onClick={()=>document.getElementById('menu-list')?.scrollIntoView({behavior:'smooth'})}>استكشف القائمة <ChevronDown size={17}/></button></div>
         <div className="hero-art"><div className="plate"><Coffee size={86}/></div><span className="art-leaf leaf-one"><Sparkles size={30}/></span><span className="art-leaf leaf-two"><Sparkles size={21}/></span></div>
@@ -886,7 +893,7 @@ export default function App() {
       <footer id="restaurant-info" className="footer"><div className="socials">
         {settings.facebook_enabled&&settings.facebook_url&&<a href={settings.facebook_url} target="_blank" rel="noreferrer" aria-label="فيسبوك"><Facebook/></a>}
         {settings.instagram_enabled&&settings.instagram_url&&<a href={settings.instagram_url} target="_blank" rel="noreferrer" aria-label="إنستغرام"><Instagram/></a>}
-      </div><div className="footer-location">{restaurantMapUrl(settings)&&<div className="footer-location-actions"><a className="footer-map-link" href={restaurantMapUrl(settings)} target="_blank" rel="noreferrer"><MapPinned size={17}/> موقع المطعم</a><button className="footer-distance-btn" type="button" onClick={calculateRestaurantDistance} disabled={distanceLoading}>{distanceLoading?'جارٍ الحساب...':'احسب المسافة'}</button></div>}{distanceInfo&&<small className={`footer-distance-result ${distanceInfo.kind}`} aria-live="polite">{distanceInfo.text}</small>}{distanceInfo?.kind==='success'&&<small className="footer-distance-credit">المسافة محسوبة على الطرق باستخدام بيانات OpenStreetMap عبر Valhalla.</small>}</div></footer>
+      </div><div className="footer-welcome">نسعد بخدمتكم دائماً</div></footer>
     </>}
 
     {page==='cart'&&<main className="content narrow"><div className="section-heading"><div><span className="eyebrow">طلبك</span><h2>سلة الطلبات</h2><p>راجع طلبك قبل الإرسال</p></div><button className="outline-btn" onClick={()=>setPage('menu')}>العودة للقائمة</button></div>
@@ -897,8 +904,8 @@ export default function App() {
       {!settings.whatsapp_enabled&&!settings.internal_orders_enabled&&<p className="muted">طرق الطلب غير مفعلة حالياً. يرجى التواصل مع المطعم.</p>}</aside></div>}
     </main>}
 
-    {page==='my-orders'&&<main className="content narrow customer-orders-page"><div className="section-heading"><div><span className="eyebrow">متابعة الطلب</span><h2>طلباتي</h2><p>طلباتك المسجلة من هذا المتصفح فقط</p></div><button className="outline-btn" onClick={loadMyOrders} disabled={myOrdersLoading}>تحديث</button></div>
-      {myOrdersLoading?<div className="empty-state">جارٍ تحميل طلباتك...</div>:myOrders.length?<div className="customer-orders-list">{myOrders.map(order=><article className="order-card customer-order-card" key={order.id}><div className="order-card-heading"><div><b>طلب #{order.order_number || String(order.id).slice(0,8)}</b><small>{new Date(order.created_at).toLocaleString('ar')}</small></div><strong>{money(order.total,settings.currency)}</strong></div><div className="order-items-list">{(order.items||[]).map((item,index)=><span key={`${order.id}-${index}`}>{arabicValue(item.name)||'منتج'} <b>× {item.quantity}</b></span>)}</div><div className={`customer-order-status status-${order.status||'new'}`}>حالة الطلب: {orderStatusLabel(order.status||'new')}</div>{order.notes&&<p className="order-customer-note">ملاحظتك: {order.notes}</p>}</article>)}</div>:<div className="empty-state"><ClipboardList size={38}/><h3>لا توجد طلبات محفوظة</h3><p>ستظهر هنا الطلبات التي ترسلها من هذا الجهاز والمتصفح.</p><button className="primary-btn" onClick={()=>setPage('menu')}>العودة إلى المينيو</button></div>}
+    {page==='my-orders'&&<main className="content narrow customer-orders-page"><div className="section-heading"><div><span className="eyebrow">متابعة الطلب</span><h2>طلباتي</h2></div><button className="outline-btn" onClick={loadMyOrders} disabled={myOrdersLoading}>تحديث</button></div>
+      {myOrdersLoading?<div className="empty-state">جارٍ تحميل طلباتك...</div>:myOrders.length?<div className="customer-orders-list">{myOrders.map(order=><article className="order-card customer-order-card" key={order.id}><div className="order-card-heading"><div><b>طلب #{order.order_number || String(order.id).slice(0,8)}</b><small>{new Date(order.created_at).toLocaleString('ar')}</small></div><strong>{money(order.total,settings.currency)}</strong></div><div className="order-items-list">{(order.items||[]).map((item,index)=><span key={`${order.id}-${index}`}>{arabicValue(item.name)||'منتج'} <b>× {item.quantity}</b></span>)}</div><div className={`customer-order-status status-${order.status||'new'}`}>حالة الطلب: {orderStatusLabel(order.status||'new')}</div>{order.notes&&<p className="order-customer-note">ملاحظتك: {order.notes}</p>}</article>)}</div>:<div className="empty-state"><ClipboardList size={38}/><h3>لا توجد طلبات محفوظة</h3><button className="primary-btn" onClick={()=>setPage('menu')}>العودة إلى المينيو</button></div>}
     </main>}
 
     {page==='admin'&&isAdminEntry&&<main className="content admin-content">{!allowedOwner?<div className="empty-state"><LogIn size={38}/><h2>دخول صاحب المطعم</h2><p>تسجيل الدخول متاح لحساب Google المحدد لهذه النسخة فقط.</p><button className="primary-btn" onClick={login}><LogIn size={17}/> الدخول باستخدام Google</button></div>:<>

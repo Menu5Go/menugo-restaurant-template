@@ -1083,3 +1083,56 @@ body {
   .top-nav .customer-menu-link { min-width: 76px; padding-inline: 10px; font-size: 13px !important; }
   .top-nav button:nth-child(3) { display: inline-flex; }
 }
+
+/* MenuGo v17: customer navigation, location actions and cleaner order tracking */
+.topbar { position: sticky; top: 0; z-index: 30; }
+.customer-location-strip {
+  max-width: 1180px;
+  margin: 12px auto 0;
+  padding: 0 24px;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 7px;
+}
+.customer-location-actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.customer-map-link, .customer-distance-btn {
+  min-height: 42px; display: inline-flex; align-items: center; justify-content: center; gap: 8px;
+  padding: 9px 15px; border-radius: 12px; text-decoration: none; font-size: 13px; font-weight: 700;
+  border: 1px solid #cbded1; background: rgba(255,255,255,.82); color: #214b38;
+  box-shadow: 0 5px 16px rgba(24,65,45,.07);
+}
+.customer-distance-btn { cursor: pointer; }
+.customer-map-link:hover, .customer-distance-btn:hover:not(:disabled) { background: #e8f2eb; }
+.customer-distance-btn:disabled { opacity: .65; cursor: wait; }
+.customer-distance-result { color: #64766a; font-size: 12px; line-height: 1.7; }
+.customer-distance-result.error { color: #a34c42; }
+.customer-distance-result.success { color: #285e42; }
+.hero { min-height: 300px; margin-top: 14px; }
+.footer { justify-content: center; min-height: 105px; }
+.footer-welcome { color: #e2eee6; font-size: 19px; font-weight: 700; text-align: center; letter-spacing: 0; }
+.customer-orders-page .section-heading p { display: none; }
+@media (max-width: 650px) {
+  .topbar { position: sticky; top: 0; min-height: 66px; padding: 7px 10px; gap: 5px; }
+  .brand { flex: 0 0 auto; max-width: 31%; }
+  .brand strong { font-size: 13px; }
+  .top-nav { flex: 1 1 69%; min-width: 0; justify-content: space-between; gap: 1px; overflow: visible; }
+  .top-nav button { flex: 0 1 auto; min-width: 0; white-space: nowrap; padding: 8px 6px; font-size: clamp(9px, 2.6vw, 11px); }
+  .top-nav button:nth-child(3) { display: inline-flex; }
+  .top-nav button svg { width: 15px; height: 15px; }
+  .customer-location-strip { margin: 9px 12px 0; padding: 0; }
+  .customer-location-actions { gap: 8px; }
+  .customer-map-link, .customer-distance-btn { min-height: 39px; padding: 8px 11px; font-size: 12px; }
+  .hero { min-height: 235px; margin: 11px 12px 0; padding: 22px 17px; }
+  .hero-art { width: 86px; height: 122px; }
+  .plate { width: 86px; height: 86px; border-width: 6px; }
+  .plate svg { width: 45px; height: 45px; }
+  .hero-copy { max-width: 75%; }
+  .footer { min-height: 88px; padding: 22px 14px; }
+  .footer-welcome { font-size: 16px; }
+}
+@media (max-width: 390px) {
+  .brand { max-width: 29%; }
+  .top-nav { flex-basis: 71%; }
+  .top-nav button { padding-inline: 4px; font-size: 9px; }
+}
