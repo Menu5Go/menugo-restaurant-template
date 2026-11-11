@@ -1184,3 +1184,7 @@ body {
   .top-nav .admin-notification-link span { display: none; }
   .top-nav .admin-notification-link { min-width: 36px; padding-inline: 8px; }
 }
+
+/* Batch 2: unavailable products remain visible but cannot be added or reviewed. */
+.product-image .menu-product-unavailable{position:absolute;top:12px;left:12px;z-index:1}
+.add-btn:disabled,.review-trigger:disabled{opacity:.48;cursor:not-allowed;filter:none;transform:none;box-shadow:none}

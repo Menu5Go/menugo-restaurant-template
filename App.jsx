@@ -139,6 +139,8 @@ export default function App() {
   const [myOrdersLoading, setMyOrdersLoading] = useState(false)
   const [orderDashboardStats, setOrderDashboardStats] = useState(null)
   const [reviews, setReviews] = useState([])
+  const [reviewsNotificationDismissed, setReviewsNotificationDismissed] = useState(false)
+  const [ordersNotificationDismissed, setOrdersNotificationDismissed] = useState(false)
   const [reviewDraft, setReviewDraft] = useState({ product: null, rating: 5, comment: '' })
   const [uploading, setUploading] = useState(false)
   const [categories, setCategories] = useState(() => supabase ? [] : demoCategories)
@@ -332,19 +334,23 @@ export default function App() {
       const AudioContextClass = window.AudioContext || window.webkitAudioContext
       if (!AudioContextClass) return
       const context = new AudioContextClass()
-      const oscillator = context.createOscillator()
-      const gain = context.createGain()
-      oscillator.type = 'sine'
-      oscillator.frequency.setValueAtTime(880, context.currentTime)
-      oscillator.frequency.setValueAtTime(1175, context.currentTime + 0.16)
-      gain.gain.setValueAtTime(0.0001, context.currentTime)
-      gain.gain.exponentialRampToValueAtTime(0.22, context.currentTime + 0.025)
-      gain.gain.exponentialRampToValueAtTime(0.0001, context.currentTime + 0.42)
-      oscillator.connect(gain)
-      gain.connect(context.destination)
-      oscillator.start()
-      oscillator.stop(context.currentTime + 0.44)
-      oscillator.onended = () => context.close()
+      const notes = [784, 988, 1175, 1568]
+      const noteGap = 0.17
+      notes.forEach((frequency, index) => {
+        const startAt = context.currentTime + index * noteGap
+        const oscillator = context.createOscillator()
+        const gain = context.createGain()
+        oscillator.type = 'triangle'
+        oscillator.frequency.setValueAtTime(frequency, startAt)
+        gain.gain.setValueAtTime(0.0001, startAt)
+        gain.gain.exponentialRampToValueAtTime(0.28, startAt + 0.018)
+        gain.gain.exponentialRampToValueAtTime(0.0001, startAt + 0.145)
+        oscillator.connect(gain)
+        gain.connect(context.destination)
+        oscillator.start(startAt)
+        oscillator.stop(startAt + 0.16)
+        if (index === notes.length - 1) oscillator.onended = () => context.close()
+      })
     } catch (error) {
       console.warn('تعذر تشغيل تنبيه الطلب:', error)
     }
@@ -361,6 +367,7 @@ export default function App() {
       const nextIds = new Set(nextOrders.map(order => order.id))
       if (seenOrderIdsRef.current) {
         const hasNewOrder = nextOrders.some(order => !seenOrderIdsRef.current.has(order.id))
+        if (hasNewOrder) setOrdersNotificationDismissed(false)
         if (hasNewOrder && settings.order_sound_enabled) playNewOrderSound()
       }
       seenOrderIdsRef.current = nextIds
@@ -433,10 +440,21 @@ export default function App() {
     }
     setUpdatingOrderId(id)
     try {
+      const currentOrder = orders.find(order => order.id === id)
+      if (currentOrder?.status === 'cancelled' && status !== 'cancelled') {
+        notify('هذا الطلب ملغى نهائياً ولا يمكن تأكيده أو إعادة تفعيله.', 'error')
+        return false
+      }
       if (supabase) {
         if (!isUuid(id)) { notify('تعذر تحديث الطلب: معرّف الطلب غير صالح.', 'error'); return false }
-        const { error } = await supabase.from('orders').update({ status }).eq('id', id)
+        // شرط قاعدة البيانات يمنع تحديث طلب أُلغي بالفعل حتى لو كانت الواجهة قديمة.
+        const { data, error } = await supabase.from('orders').update({ status }).eq('id', id).neq('status', 'cancelled').select('id,status').maybeSingle()
         if (error) { notify(saveFailureMessage(error, 'تحديث حالة الطلب'), 'error'); return false }
+        if (!data) {
+          await loadOrders()
+          notify('هذا الطلب ملغى نهائياً ولا يمكن تأكيده أو إعادة تفعيله.', 'error')
+          return false
+        }
       }
       setOrders(prev => prev.map(o => o.id === id ? { ...o, status } : o))
       notify(`تم تحديث حالة الطلب إلى ${orderStatusLabel(status)}`)
@@ -525,6 +543,11 @@ export default function App() {
   }
   const submitReview = async () => {
     if (!reviewDraft.product || !supabase) return
+    const currentReviewProduct = products.find(product => product.id === reviewDraft.product.id)
+    if (!currentReviewProduct || currentReviewProduct.is_available === false) {
+      setReviewDraft({ product: null, rating: 5, comment: '' })
+      return notify('التقييم غير متاح لهذا المنتج حالياً.', 'error')
+    }
     let visitorId = localStorage.getItem('menugo_visitor_id')
     if (!visitorId) { visitorId = crypto.randomUUID(); localStorage.setItem('menugo_visitor_id', visitorId) }
     const { error } = await supabase.from('product_reviews').insert({
@@ -642,7 +665,7 @@ export default function App() {
 
   const visibleCategories = categories.filter(c => c.is_visible !== false && c.is_published !== false).sort((a,b) => a.sort_order-b.sort_order)
   const shownProducts = useMemo(() => products.filter(p =>
-    p.is_available !== false && p.is_published !== false &&
+    p.is_published !== false &&
     (activeCategory === 'all' || p.category_id === activeCategory) &&
     (`${localized(p,'name')} ${localized(p,'description')}`).toLowerCase().includes(search.toLowerCase())
   ), [products, activeCategory, search])
@@ -677,11 +700,14 @@ export default function App() {
     return () => window.clearTimeout(timer)
   }, [notice])
   const updateSetting = (key, value) => setSettings(prev => ({ ...prev, [key]: value }))
-  const addToCart = (product) => setCart(prev => {
+  const addToCart = (product) => {
+    if (!product || product.is_available === false) return
+    setCart(prev => {
     const found = prev.find(x => x.id === product.id)
     const arabicProduct = { ...product, name: localized(product, 'name'), description: localized(product, 'description') }
     return found ? prev.map(x => x.id === product.id ? { ...x, quantity: x.quantity + 1 } : x) : [...prev, { ...arabicProduct, quantity: 1 }]
-  })
+    })
+  }
   const changeQty = (id, delta) => setCart(prev => prev.map(x => x.id === id ? { ...x, quantity: x.quantity + delta } : x).filter(x => x.quantity > 0))
   const saveSettings = async () => {
     if (savingSettings) return
@@ -864,7 +890,9 @@ export default function App() {
       }
     })
   }
+  const unavailableCartItems = () => cart.filter(item => products.some(product => product.id === item.id && product.is_available === false))
   const sendWhatsApp = () => {
+    if (unavailableCartItems().length) return notify('يوجد منتج غير متوفر في السلة. احذفه قبل إرسال الطلب.', 'error')
     if (!settings.whatsapp_enabled) return notify('الطلب عبر واتساب غير متاح حالياً')
     if (!cart.length) return notify('السلة فارغة')
     const lines = cart.map(x => `• ${x.name} × ${x.quantity} — ${money(x.price*x.quantity, settings.currency)}`).join('\\n')
@@ -875,6 +903,7 @@ export default function App() {
   }
   const submitInternalOrder = async () => {
     if (orderSubmitLock.current) return
+    if (unavailableCartItems().length) return notify('يوجد منتج غير متوفر في السلة. احذفه قبل تأكيد الطلب.', 'error')
     if (new URLSearchParams(window.location.search).has('table') && !activeRestaurantTable && !activeQrIsGeneral) return notify('تعذر التعرف على الطاولة من رمز QR؛ أعد فتح رمز الطاولة الصحيح')
     if (!settings.internal_orders_enabled) return notify('الطلبات الداخلية غير مفعلة')
     if (!cart.length) return notify('السلة فارغة')
@@ -926,12 +955,12 @@ export default function App() {
           <button className={page==='menu'?'active':''} onClick={()=>setPage('menu')}>المينيو</button>
           <button className={page==='admin'?'active':''} onClick={()=>setPage('admin')}>لوحة الإدارة</button>
           {isAdminEntry ? <>
-            <button className="admin-notification-link" onClick={() => { setActiveAdminSection('reviews'); loadReviews() }} aria-label="إشعارات التقييمات" title="إشعارات التقييمات"><Bell size={18}/><span>الإشعارات</span>{reviews.length>0&&<i className="notification-count">{reviews.length}</i>}</button>
-            <button className="admin-notification-link order-notification-link" onClick={() => { setActiveAdminSection('orders'); loadOrders() }} aria-label="تنبيهات الطلبات الجديدة" title="الطلبات الجديدة"><BellRing size={18}/><span>الطلبات</span>{newOrdersCount>0&&<i className="notification-count">{newOrdersCount}</i>}</button>
+            <button className="admin-notification-link" onClick={() => { setReviewsNotificationDismissed(true); setActiveAdminSection('reviews'); loadReviews() }} aria-label="إشعارات التقييمات" title="إشعارات التقييمات"><Bell size={18}/><span>الإشعارات</span>{!reviewsNotificationDismissed&&reviews.length>0&&<i className="notification-count">{reviews.length}</i>}</button>
+            <button className="admin-notification-link order-notification-link" onClick={() => { setOrdersNotificationDismissed(true); setActiveAdminSection('orders'); loadOrders() }} aria-label="تنبيهات الطلبات الجديدة" title="الطلبات الجديدة"><BellRing size={18}/><span>الطلبات</span>{!ordersNotificationDismissed&&newOrdersCount>0&&<i className="notification-count">{newOrdersCount}</i>}</button>
           </> : <button className={page==='cart'?'active':''} onClick={()=>setPage('cart')}>السلة <span className="count">{count}</span></button>}
         </> : <>
           <button className={`customer-menu-link ${page==='menu'?'active':''}`} onClick={()=>setPage('menu')}>المينيو</button>
-          <button className={page==='cart'?'active':''} onClick={()=>setPage('cart')}><ShoppingCart size={17}/> السلة <span className="count">{count}</span></button>
+          {!isAdminEntry&&<button className={page==='cart'?'active':''} onClick={()=>setPage('cart')}><ShoppingCart size={17}/> السلة <span className="count">{count}</span></button>}
           <button className={page==='my-orders'?'active':''} onClick={openMyOrders}><ClipboardList size={17}/> متابعة الطلب</button>
         </>}
       </nav>
@@ -952,7 +981,7 @@ export default function App() {
       <main id="menu-list" className="content">
         <div className="section-heading"><div><span className="eyebrow">قائمتنا</span><h2>قائمتنا</h2><p>اختر من أشهى الأصناف المحضرة بعناية</p></div><label className="search-box"><Search size={18}/><input value={search} onChange={e=>setSearch(e.target.value)} placeholder="ابحث عن طبق أو مشروب..."/></label></div>
         <div className="category-tabs"><button className={activeCategory==='all'?'selected':''} onClick={()=>setActiveCategory('all')}>الكل</button>{visibleCategories.map(c=><button key={c.id} className={activeCategory===c.id?'selected':''} onClick={()=>setActiveCategory(c.id)}>{localized(c,'name')}</button>)}</div>
-        <div className="product-grid">{shownProducts.map(p=><article className="product-card" key={p.id} onClick={()=>trackProductView(p.id)}><div className="product-image">{p.image_url?<img src={p.image_url} alt={p.name}/>:<div className="food-placeholder"><UtensilsCrossed size={34}/></div>}{p.is_featured&&<span className="featured">اختيار مميز</span>}</div><div className="product-info"><div><h3>{localized(p,'name')}</h3><p>{localized(p,'description')}</p></div><div className="product-bottom"><strong>{money(p.price,settings.currency)}</strong><button className="add-btn" onClick={()=>addToCart(p)} aria-label="إضافة المنتج">إضافة</button></div><button className="tiny-btn review-trigger" onClick={e=>{e.stopPropagation();setReviewDraft({product:p,rating:5,comment:''})}}>قيّم هذا المنتج</button></div></article>)}</div>
+        <div className="product-grid">{shownProducts.map(p=><article className="product-card" key={p.id} onClick={()=>trackProductView(p.id)}><div className="product-image">{p.image_url?<img src={p.image_url} alt={p.name}/>:<div className="food-placeholder"><UtensilsCrossed size={34}/></div>}{p.is_featured&&<span className="featured">اختيار مميز</span>}{p.is_available===false&&<span className="product-availability unavailable menu-product-unavailable">غير متوفر</span>}</div><div className="product-info"><div><h3>{localized(p,'name')}</h3><p>{localized(p,'description')}</p></div><div className="product-bottom"><strong>{money(p.price,settings.currency)}</strong><button className="add-btn" disabled={p.is_available===false} onClick={()=>addToCart(p)} aria-label="إضافة المنتج">إضافة</button></div><button className="tiny-btn review-trigger" disabled={p.is_available===false} onClick={e=>{e.stopPropagation();if(p.is_available!==false)setReviewDraft({product:p,rating:5,comment:''})}}>قيّم هذا المنتج</button></div></article>)}</div>
         {!shownProducts.length&&<div className="empty-state">لا توجد منتجات مطابقة حالياً.</div>}
       </main>
       <footer id="restaurant-info" className="footer"><div className="socials">
@@ -1077,6 +1106,6 @@ export default function App() {
         </div>
       </section>
     </div>}
-    {page==='menu'&&cart.length>0&&<button className="floating-cart" onClick={()=>setPage('cart')}><ShoppingCart/> إرسال الطلب <b>{count}</b><strong>{money(total,settings.currency)}</strong></button>}
+    {page==='menu'&&cart.length>0&&!isAdminEntry&&<button className="floating-cart" onClick={()=>setPage('cart')}><ShoppingCart/> إرسال الطلب <b>{count}</b><strong>{money(total,settings.currency)}</strong></button>}
   </div>
 }
